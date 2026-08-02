@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include <algorithm>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "catalog.h"
 #include "io.h"
@@ -62,22 +66,84 @@ Options ParseOptions(int argc, char** argv) {
   return options;
 }
 
-void WriteMetadata(const std::string& prefix,
-                   const std::vector<pgensparsescore::Sample>& samples,
-                   const pgensparsescore::Catalog& catalog,
-                   const pgensparsescore::ScoreRunStats& stats,
-                   uint64_t matrix_byte_ct) {
-  {
-    std::ofstream output(prefix + ".samples.tsv");
-    if (!output) throw std::runtime_error("cannot write sample metadata");
-    output << "INDEX\tFID\tIID\n";
-    for (uint32_t idx = 0; idx < samples.size(); ++idx) {
-      output << idx << '\t' << samples[idx].fid << '\t' << samples[idx].iid
-             << '\n';
+void AppendDouble(double value, std::string* output) {
+  char buffer[64];
+  const auto result = std::to_chars(
+      buffer, buffer + sizeof(buffer), value, std::chars_format::general,
+      std::numeric_limits<double>::max_digits10);
+  if (result.ec != std::errc()) {
+    throw std::runtime_error("cannot format score value");
+  }
+  output->append(buffer, result.ptr);
+}
+
+void WriteWideScores(const std::string& prefix,
+                     const std::vector<pgensparsescore::Sample>& samples,
+                     const pgensparsescore::Catalog& catalog,
+                     const pgensparsescore::MappedMatrix& matrix) {
+  const std::string final_path = prefix + ".scores.tsv.gz";
+  const std::string temporary_path = final_path + ".tmp";
+  pgensparsescore::GzipWriter output(temporary_path);
+
+  std::string line = "FID\tIID";
+  for (const auto& score : catalog.scores) {
+    line.push_back('\t');
+    line += score.id;
+  }
+  line.push_back('\n');
+  output.Write(line);
+
+  constexpr uint64_t kTransposeBufferBytes = 64ULL * 1024 * 1024;
+  const uint64_t bytes_per_sample =
+      static_cast<uint64_t>(catalog.scores.size()) * sizeof(double);
+  const uint32_t block_capacity = static_cast<uint32_t>(std::max<uint64_t>(
+      1, std::min<uint64_t>(samples.size(),
+                            kTransposeBufferBytes / bytes_per_sample)));
+  std::vector<double> sample_major_block(
+      static_cast<uint64_t>(block_capacity) * catalog.scores.size());
+
+  for (uint32_t sample_begin = 0; sample_begin < samples.size();
+       sample_begin += block_capacity) {
+    const uint32_t block_size = static_cast<uint32_t>(std::min<uint64_t>(
+        block_capacity, samples.size() - sample_begin));
+    for (uint32_t score_idx = 0; score_idx < catalog.scores.size();
+         ++score_idx) {
+      const double* score_row = matrix.Row(score_idx) + sample_begin;
+      for (uint32_t block_idx = 0; block_idx < block_size; ++block_idx) {
+        sample_major_block[static_cast<uint64_t>(block_idx) *
+                               catalog.scores.size() +
+                           score_idx] = score_row[block_idx];
+      }
+    }
+    for (uint32_t block_idx = 0; block_idx < block_size; ++block_idx) {
+      const auto& sample = samples[sample_begin + block_idx];
+      line.clear();
+      line.reserve(32 + catalog.scores.size() * 12);
+      line += sample.fid;
+      line.push_back('\t');
+      line += sample.iid;
+      const double* row =
+          sample_major_block.data() +
+          static_cast<uint64_t>(block_idx) * catalog.scores.size();
+      for (uint32_t score_idx = 0; score_idx < catalog.scores.size();
+           ++score_idx) {
+        line.push_back('\t');
+        AppendDouble(row[score_idx], &line);
+      }
+      line.push_back('\n');
+      output.Write(line);
     }
   }
+  output.Close();
+  std::filesystem::rename(temporary_path, final_path);
+}
+
+void WriteMetadata(const std::string& prefix, uint32_t sample_ct,
+                   uint64_t working_matrix_byte_ct,
+                   const pgensparsescore::Catalog& catalog,
+                   const pgensparsescore::ScoreRunStats& stats) {
   {
-    std::ofstream output(prefix + ".scores.tsv");
+    std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
     output << "INDEX\tSCORE\tINPUT_WEIGHTS\tMATCHED_WEIGHTS\tMISSING_VARIANTS"
               "\tALT_EFFECTS\tREF_EFFECTS\tREF_INTERCEPT\n";
@@ -92,16 +158,15 @@ void WriteMetadata(const std::string& prefix,
   {
     std::ofstream output(prefix + ".json");
     if (!output) throw std::runtime_error("cannot write JSON metadata");
-    const std::filesystem::path binary(prefix + ".scores.bin");
+    const std::filesystem::path scores(prefix + ".scores.tsv.gz");
     output << "{\n"
-           << "  \"format\": \"pgensparsescore-matrix-v1\",\n"
+           << "  \"format\": \"pgensparsescore-wide-tsv-v1\",\n"
            << "  \"path\": \""
-           << pgensparsescore::JsonEscape(binary.filename().string()) << "\",\n"
-           << "  \"dtype\": \"<f8\",\n"
-           << "  \"order\": \"C\",\n"
-           << "  \"shape\": [" << catalog.scores.size() << ", "
-           << samples.size() << "],\n"
-           << "  \"matrix_bytes\": " << matrix_byte_ct << ",\n"
+           << pgensparsescore::JsonEscape(scores.filename().string()) << "\",\n"
+           << "  \"sample_rows\": " << sample_ct << ",\n"
+           << "  \"score_columns\": " << catalog.scores.size() << ",\n"
+           << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
+           << ",\n"
            << "  \"scored_variants\": " << stats.variant_ct << ",\n"
            << "  \"weight_edges\": " << stats.edge_ct << ",\n"
            << "  \"sparse_variants\": " << stats.sparse_variant_ct << ",\n"
@@ -131,13 +196,25 @@ int main(int argc, char** argv) {
     }
     const auto catalog =
         pgensparsescore::CompileCatalog(options.manifest, variants);
-    pgensparsescore::MappedMatrix matrix(options.out + ".scores.bin",
-                                         catalog.scores.size(), samples.size());
-    const auto stats =
-        pgensparsescore::ScoreCatalog(catalog, &reader, &matrix);
-    WriteMetadata(options.out, samples, catalog, stats, matrix.byte_ct());
-    std::cerr << "wrote " << catalog.scores.size() << " scores for "
-              << samples.size() << " samples; " << stats.sparse_variant_ct
+
+    const std::string working_path = options.out + ".work.score-major.bin";
+    pgensparsescore::ScoreRunStats stats;
+    uint64_t working_matrix_byte_ct = 0;
+    {
+      pgensparsescore::MappedMatrix matrix(
+          working_path, catalog.scores.size(), samples.size());
+      working_matrix_byte_ct = matrix.byte_ct();
+      stats = pgensparsescore::ScoreCatalog(catalog, &reader, &matrix);
+      WriteWideScores(options.out, samples, catalog, matrix);
+    }
+    if (!std::filesystem::remove(working_path)) {
+      throw std::runtime_error("cannot remove working score matrix " +
+                               working_path);
+    }
+    WriteMetadata(options.out, samples.size(), working_matrix_byte_ct, catalog,
+                  stats);
+    std::cerr << "wrote " << catalog.scores.size() << " named score columns for "
+              << samples.size() << " sample rows; " << stats.sparse_variant_ct
               << " sparse and " << stats.dense_variant_ct
               << " dense variant decodes\n";
     return 0;

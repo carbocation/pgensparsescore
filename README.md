@@ -67,24 +67,26 @@ pgensparsescore \
   --out results/catalog
 ```
 
-The output is deliberately simple and language-independent:
+The primary output, `catalog.scores.tsv.gz`, is a gzip-compressed wide table.
+Each row is a sample, the first two columns are `FID` and `IID`, and every
+remaining column is named by its manifest `SCORE` value:
 
-- `catalog.scores.bin`: little-endian float64 matrix in C order, with shape
-  `(score_count, sample_count)`.
-- `catalog.scores.tsv`: score order and matching/QC counts.
-- `catalog.samples.tsv`: sample order.
-- `catalog.json`: matrix shape, dtype, order, and run-level counters.
-
-For example, Python can open the matrix without copying it:
-
-```python
-scores = numpy.memmap(
-    "results/catalog.scores.bin",
-    dtype="<f8",
-    mode="r",
-    shape=(score_count, sample_count),
-)
+```text
+FID\tIID\tscore_a\tscore_b
+family1\tsample1\t0.125\t-1.75
+family2\tsample2\t0.5\t0.25
 ```
+
+Additional outputs are:
+
+- `catalog.score-metadata.tsv`: score order and matching/QC counts.
+- `catalog.json`: output dimensions and run-level counters.
+
+The scorer uses a file-backed score-major matrix while applying variants,
+since that is the efficient update layout.  It transposes that working matrix
+in bounded-memory blocks when writing the sample-major table, then removes the
+working file.  Score-major layout is therefore an implementation detail, not
+part of the output contract.
 
 ## Scoring semantics
 

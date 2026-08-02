@@ -1,5 +1,6 @@
 /build/
-*.scores.bin
-*.scores.tsv
-*.samples.tsv
+*.work.score-major.bin
+*.scores.tsv.gz
+*.scores.tsv.gz.tmp
+*.score-metadata.tsv
 *.json

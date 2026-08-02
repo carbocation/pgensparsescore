@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import math
 import pathlib
-import struct
 import subprocess
 import tempfile
 
@@ -104,12 +104,16 @@ def main() -> None:
             str(output),
         )
 
-        raw_scores = output.with_suffix(".scores.bin").read_bytes()
-        values = list(struct.unpack("<8d", raw_scores))
-        score1 = values[:4]
-        score2 = values[4:]
+        with gzip.open(output.with_suffix(".scores.tsv.gz"), "rt", newline="") as handle:
+            output_rows = list(csv.DictReader(handle, delimiter="\t"))
+        if list(output_rows[0]) != ["FID", "IID", "score1", "score2"]:
+            raise AssertionError(f"unexpected output columns: {list(output_rows[0])}")
+        score1 = [float(row["score1"]) for row in output_rows]
+        score2 = [float(row["score2"]) for row in output_rows]
         assert_close(score1, [0.0, 2.0, 7.0, 2.0], "direct score1")
         assert_close(score2, [2.0, 1.0, 0.0, 1.0], "direct score2")
+        if output.with_suffix(".work.score-major.bin").exists():
+            raise AssertionError("working score-major matrix was not removed")
 
         for score_name in ("score1", "score2"):
             plink_weights = tmp / f"{score_name}.plink.tsv"

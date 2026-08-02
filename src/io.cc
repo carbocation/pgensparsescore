@@ -2,6 +2,7 @@
 #include "io.h"
 
 #include <array>
+#include <limits>
 #include <stdexcept>
 
 namespace pgensparsescore {
@@ -72,6 +73,48 @@ bool LineReader::GetLine(std::string* line) {
     line->pop_back();
   }
   return true;
+}
+
+GzipWriter::GzipWriter(const std::string& path) : path_(path) {
+  gz_ = gzopen(path.c_str(), "wb6");
+  if (!gz_) {
+    throw std::runtime_error("cannot create " + path);
+  }
+}
+
+GzipWriter::~GzipWriter() {
+  if (gz_) {
+    gzclose(gz_);
+  }
+}
+
+void GzipWriter::Write(std::string_view value) {
+  size_t offset = 0;
+  while (offset < value.size()) {
+    const size_t chunk_size = std::min(
+        value.size() - offset,
+        static_cast<size_t>(std::numeric_limits<int>::max()));
+    const int written = gzwrite(gz_, value.data() + offset,
+                                static_cast<unsigned int>(chunk_size));
+    if (written <= 0 || static_cast<size_t>(written) != chunk_size) {
+      int error_number = Z_OK;
+      const char* message = gzerror(gz_, &error_number);
+      throw std::runtime_error("error writing " + path_ + ": " +
+                               (message ? message : "unknown zlib error"));
+    }
+    offset += chunk_size;
+  }
+}
+
+void GzipWriter::Close() {
+  if (!gz_) {
+    return;
+  }
+  const int result = gzclose(gz_);
+  gz_ = nullptr;
+  if (result != Z_OK) {
+    throw std::runtime_error("error closing " + path_);
+  }
 }
 
 std::vector<std::string> SplitTabs(const std::string& line) {

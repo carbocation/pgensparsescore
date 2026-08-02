@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <zlib.h>
@@ -22,6 +23,22 @@ class LineReader {
  private:
   bool gzip_ = false;
   std::ifstream plain_;
+  gzFile gz_ = nullptr;
+  std::string path_;
+};
+
+class GzipWriter {
+ public:
+  explicit GzipWriter(const std::string& path);
+  ~GzipWriter();
+
+  GzipWriter(const GzipWriter&) = delete;
+  GzipWriter& operator=(const GzipWriter&) = delete;
+
+  void Write(std::string_view value);
+  void Close();
+
+ private:
   gzFile gz_ = nullptr;
   std::string path_;
 };
