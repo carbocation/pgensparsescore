@@ -6,9 +6,10 @@ vector is applied only to the scores which contain that variant.
 
 This is an early correctness-first implementation.  It supports biallelic
 variants, PGEN hardcalls and dosages, mean imputation of missing dosages, and
-REF/ALT effect-allele orientation.  PGEN dosages are used on the stored
-0--2 scale; chromosome- and sex-specific ploidy transformations are not yet
-performed.
+weights whose effect allele is either REF or ALT.  The allele order in a
+weight row does not need to match the PVAR allele order.  PGEN dosages are used
+on the stored 0--2 scale; chromosome- and sex-specific ploidy transformations
+are not yet performed.
 
 ## Build
 
@@ -43,8 +44,17 @@ SNP\tEFFECT_ALLELE\tOTHER_ALLELE\tEFFECT_ALLELE_WEIGHT
 ```
 
 `SNP` is matched exactly to the PVAR `ID`.  The effect and other alleles must
-match its REF/ALT pair in either order.  Multiallelic PVAR records are rejected
-when referenced by a score.
+be the PVAR REF/ALT pair, but they may appear in either order.  For example,
+both of these are valid for a PVAR record with `REF=C` and `ALT=T`:
+
+```text
+EFFECT_ALLELE=T  OTHER_ALLELE=C
+EFFECT_ALLELE=C  OTHER_ALLELE=T
+```
+
+The scorer does not perform strand-complement guessing.  A matched variant
+whose two alleles do not exactly equal the PVAR REF/ALT pair is an error.
+Multiallelic PVAR records are rejected when referenced by a score.
 
 ## Run
 
@@ -78,10 +88,19 @@ scores = numpy.memmap(
 
 ## Scoring semantics
 
-For a weight `w`, an ALT effect allele contributes `w * ALT_DOSAGE`.  A REF
-effect allele contributes `w * (2 - ALT_DOSAGE)`.  Missing ALT dosages are
-mean-imputed from nonmissing samples at that variant.  An all-missing scored
-variant is an error.
+The input allele order determines which of two equivalent calculations is
+used; it is not an input restriction:
+
+| Weight row | Contribution |
+| --- | --- |
+| effect = PVAR ALT, other = PVAR REF | `w * ALT_DOSAGE` |
+| effect = PVAR REF, other = PVAR ALT | `w * (2 - ALT_DOSAGE)` |
+
+Internally, the second expression is rewritten as
+`2 * w - w * ALT_DOSAGE`.  This permits the scoring kernel to operate entirely
+on ALT dosages without changing the meaning of a REF-effect weight.  Missing
+ALT dosages are mean-imputed from nonmissing samples at that variant.  An
+all-missing scored variant is an error.
 
 When `pgenlib` can return a common dosage plus a short difference list, the
 common contribution is accumulated once per score and only the differing
