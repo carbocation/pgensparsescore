@@ -1,0 +1,8 @@
+SPDX-License-Identifier: GPL-3.0-only
+
+This project is licensed under the GNU General Public License version 3 only.
+The complete license text is available at:
+
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+The pgenlib dependency is licensed separately under LGPL-3.0.

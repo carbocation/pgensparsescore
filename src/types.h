@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace pgensparsescore {
+
+struct Variant {
+  std::string chrom;
+  std::string id;
+  std::string ref;
+  std::string alt;
+};
+
+struct Sample {
+  std::string fid;
+  std::string iid;
+};
+
+struct Edge {
+  uint32_t score_idx;
+  double beta_alt;
+};
+
+struct VariantEdges {
+  uint32_t variant_idx;
+  std::vector<Edge> edges;
+};
+
+struct ScoreInfo {
+  std::string id;
+  std::string path;
+  uint64_t input_weight_ct = 0;
+  uint64_t matched_weight_ct = 0;
+  uint64_t missing_variant_ct = 0;
+  uint64_t ref_effect_ct = 0;
+  uint64_t alt_effect_ct = 0;
+  double ref_effect_intercept = 0.0;
+};
+
+struct Catalog {
+  std::vector<ScoreInfo> scores;
+  std::vector<VariantEdges> variants;
+  std::vector<double> intercepts;
+};
+
+struct ScoreRunStats {
+  uint64_t variant_ct = 0;
+  uint64_t edge_ct = 0;
+  uint64_t sparse_variant_ct = 0;
+  uint64_t dense_variant_ct = 0;
+  uint64_t imputed_value_ct = 0;
+};
+
+}  // namespace pgensparsescore

@@ -1,0 +1,5 @@
+/build/
+*.scores.bin
+*.scores.tsv
+*.samples.tsv
+*.json
