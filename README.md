@@ -68,13 +68,14 @@ pgensparsescore \
 ```
 
 The primary output, `catalog.scores.tsv.gz`, is a gzip-compressed wide table.
-Each row is a sample, the first two columns are `FID` and `IID`, and every
-remaining column is named by its manifest `SCORE` value:
+Each row is a sample, followed by one column named for every manifest `SCORE`.
+`IID` is required in the PSAM.  If the PSAM also has `FID`, it is preserved;
+the scorer does not invent one when it is absent:
 
 ```text
-FID\tIID\tscore_a\tscore_b
-family1\tsample1\t0.125\t-1.75
-family2\tsample2\t0.5\t0.25
+IID\tscore_a\tscore_b
+sample1\t0.125\t-1.75
+sample2\t0.5\t0.25
 ```
 
 Additional outputs are:

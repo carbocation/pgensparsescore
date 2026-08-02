@@ -85,7 +85,8 @@ void WriteWideScores(const std::string& prefix,
   const std::string temporary_path = final_path + ".tmp";
   pgensparsescore::GzipWriter output(temporary_path);
 
-  std::string line = "FID\tIID";
+  const bool has_fid = samples.front().fid.has_value();
+  std::string line = has_fid ? "FID\tIID" : "IID";
   for (const auto& score : catalog.scores) {
     line.push_back('\t');
     line += score.id;
@@ -119,8 +120,10 @@ void WriteWideScores(const std::string& prefix,
       const auto& sample = samples[sample_begin + block_idx];
       line.clear();
       line.reserve(32 + catalog.scores.size() * 12);
-      line += sample.fid;
-      line.push_back('\t');
+      if (has_fid) {
+        line += *sample.fid;
+        line.push_back('\t');
+      }
       line += sample.iid;
       const double* row =
           sample_major_block.data() +
@@ -139,6 +142,7 @@ void WriteWideScores(const std::string& prefix,
 }
 
 void WriteMetadata(const std::string& prefix, uint32_t sample_ct,
+                   bool has_fid,
                    uint64_t working_matrix_byte_ct,
                    const pgensparsescore::Catalog& catalog,
                    const pgensparsescore::ScoreRunStats& stats) {
@@ -163,6 +167,8 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct,
            << "  \"format\": \"pgensparsescore-wide-tsv-v1\",\n"
            << "  \"path\": \""
            << pgensparsescore::JsonEscape(scores.filename().string()) << "\",\n"
+           << "  \"sample_id_columns\": "
+           << (has_fid ? "[\"FID\", \"IID\"]" : "[\"IID\"]") << ",\n"
            << "  \"sample_rows\": " << sample_ct << ",\n"
            << "  \"score_columns\": " << catalog.scores.size() << ",\n"
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
@@ -211,8 +217,8 @@ int main(int argc, char** argv) {
       throw std::runtime_error("cannot remove working score matrix " +
                                working_path);
     }
-    WriteMetadata(options.out, samples.size(), working_matrix_byte_ct, catalog,
-                  stats);
+    WriteMetadata(options.out, samples.size(), samples.front().fid.has_value(),
+                  working_matrix_byte_ct, catalog, stats);
     std::cerr << "wrote " << catalog.scores.size() << " named score columns for "
               << samples.size() << " sample rows; " << stats.sparse_variant_ct
               << " sparse and " << stats.dense_variant_ct

@@ -106,7 +106,7 @@ def main() -> None:
 
         with gzip.open(output.with_suffix(".scores.tsv.gz"), "rt", newline="") as handle:
             output_rows = list(csv.DictReader(handle, delimiter="\t"))
-        if list(output_rows[0]) != ["FID", "IID", "score1", "score2"]:
+        if list(output_rows[0]) != ["IID", "score1", "score2"]:
             raise AssertionError(f"unexpected output columns: {list(output_rows[0])}")
         score1 = [float(row["score1"]) for row in output_rows]
         score2 = [float(row["score2"]) for row in output_rows]

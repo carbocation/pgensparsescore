@@ -138,8 +138,11 @@ std::vector<Sample> ReadPsam(const std::string& path) {
                                ? iid_idx
                                : std::max(iid_idx, fid_iter->second);
     RequireFieldCount(fields, max_idx, path, line_number);
-    samples.push_back({fid_iter == header.end() ? "0" : fields[fid_iter->second],
-                       fields[iid_idx]});
+    samples.push_back(
+        {fid_iter == header.end()
+             ? std::nullopt
+             : std::optional<std::string>(fields[fid_iter->second]),
+         fields[iid_idx]});
   }
   if (header.empty()) {
     throw std::runtime_error(path + " has no header");

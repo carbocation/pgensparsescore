@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,7 +16,7 @@ struct Variant {
 };
 
 struct Sample {
-  std::string fid;
+  std::optional<std::string> fid;
   std::string iid;
 };
 
