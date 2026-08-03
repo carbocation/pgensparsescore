@@ -153,8 +153,53 @@ std::vector<Sample> ReadPsam(const std::string& path) {
   return samples;
 }
 
+VariantMap ReadVariantMap(const std::string& path) {
+  LineReader reader(path);
+  std::string line;
+  if (!reader.GetLine(&line)) {
+    throw std::runtime_error(path + " is empty");
+  }
+  const Header header = MakeHeader(SplitTabs(line));
+  const size_t source_idx = RequireColumn(header, "SOURCE_ID", path);
+  const size_t target_idx = RequireColumn(header, "TARGET_ID", path);
+  VariantMap result;
+  std::unordered_set<std::string> targets;
+  uint64_t line_number = 1;
+  while (reader.GetLine(&line)) {
+    ++line_number;
+    if (line.empty()) {
+      continue;
+    }
+    const auto fields = SplitTabs(line);
+    RequireFieldCount(fields, std::max(source_idx, target_idx), path,
+                      line_number);
+    const std::string& source = fields[source_idx];
+    const std::string& target = fields[target_idx];
+    if (source.empty() || target.empty()) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " has a blank variant ID");
+    }
+    if (!result.emplace(source, target).second) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " duplicates SOURCE_ID " + source);
+    }
+    if (!targets.insert(target).second) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " duplicates TARGET_ID " + target);
+    }
+  }
+  if (result.empty()) {
+    throw std::runtime_error(path + " has no variant mappings");
+  }
+  return result;
+}
+
 Catalog CompileCatalog(const std::string& manifest_path,
-                       const std::vector<Variant>& variants) {
+                       const std::vector<Variant>& variants,
+                       const VariantMap* variant_map) {
   std::unordered_map<std::string, uint32_t> variant_by_id;
   variant_by_id.reserve(variants.size());
   for (uint32_t idx = 0; idx < variants.size(); ++idx) {
@@ -242,7 +287,16 @@ Catalog CompileCatalog(const std::string& manifest_path,
       ++info.input_weight_ct;
       const auto fields = SplitTabs(line);
       RequireFieldCount(fields, max_idx, item.path, line_number);
-      const auto pvar_iter = variant_by_id.find(fields[snp_idx]);
+      std::string target_id = fields[snp_idx];
+      if (variant_map) {
+        const auto mapping = variant_map->find(target_id);
+        if (mapping == variant_map->end()) {
+          ++info.missing_variant_ct;
+          continue;
+        }
+        target_id = mapping->second;
+      }
+      const auto pvar_iter = variant_by_id.find(target_id);
       if (pvar_iter == variant_by_id.end()) {
         ++info.missing_variant_ct;
         continue;

@@ -57,6 +57,33 @@ The scorer does not perform strand-complement guessing.  A matched variant
 whose two alleles do not exactly equal the PVAR REF/ALT pair is an error.
 Multiallelic PVAR records are rejected when referenced by a score.
 
+### Variant-ID mapping
+
+When the weight files and target PVAR use different IDs for the same exact
+REF/ALT variant, supply a two-column variant map:
+
+```text
+SOURCE_ID\tTARGET_ID
+DRAGEN:chr1:100:A:G\trs123
+```
+
+```sh
+pgensparsescore \
+  --pfile-list reference.pfiles.tsv \
+  --manifest scores.tsv \
+  --variant-map reference.variant-map.tsv.zst \
+  --read-freq reference.acount.zst \
+  --error-on-missing-freq \
+  --out results/reference
+```
+
+The map may be plain text, gzip, or zstd. `SOURCE_ID` is the ID in each score
+row and `TARGET_ID` is the PVAR ID. Both columns must be unique. A score row
+whose source ID is absent from the map is counted as a missing variant; a
+mapped row is still required to have the exact PVAR REF/ALT allele pair. This
+keeps ID translation separate from allele interpretation and avoids creating
+a translated copy of every score file.
+
 ## Run
 
 ```sh
@@ -139,6 +166,9 @@ Additional outputs are:
 
 - `catalog.score-metadata.tsv`: score order and matching/QC counts.
 - `catalog.json`: output dimensions and run-level counters.
+
+The JSON also records `variant_mapping_rows` (zero when `--variant-map` is not
+used).
 
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix

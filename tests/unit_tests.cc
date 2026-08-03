@@ -97,6 +97,42 @@ void TestCatalogOrientation() {
   std::filesystem::remove_all(directory);
 }
 
+void TestVariantMapping() {
+  const auto directory = TempPath("-variant-map");
+  std::filesystem::create_directories(directory);
+  const auto weight_path = directory / "weights.tsv";
+  const auto manifest_path = directory / "manifest.tsv";
+  const auto mapping_path = directory / "mapping.tsv";
+  {
+    std::ofstream output(weight_path);
+    output << "SNP\tEFFECT_ALLELE\tOTHER_ALLELE\tEFFECT_ALLELE_WEIGHT\n"
+           << "source-v1\tG\tA\t2\n"
+           << "unmapped\tA\tG\t4\n";
+  }
+  {
+    std::ofstream output(manifest_path);
+    output << "SCORE\tPATH\nscore1\tweights.tsv\n";
+  }
+  {
+    std::ofstream output(mapping_path);
+    output << "SOURCE_ID\tTARGET_ID\nsource-v1\ttarget-v1\n";
+  }
+  const auto mapping =
+      pgensparsescore::ReadVariantMap(mapping_path.string());
+  const std::vector<pgensparsescore::Variant> variants{
+      {"1", "target-v1", "A", "G"}};
+  const auto catalog = pgensparsescore::CompileCatalog(
+      manifest_path.string(), variants, &mapping);
+  if (catalog.variants.size() != 1 ||
+      catalog.scores[0].matched_weight_ct != 1 ||
+      catalog.scores[0].missing_variant_ct != 1) {
+    throw std::runtime_error("variant-map matching/QC counts are wrong");
+  }
+  ExpectNear(catalog.variants[0].edges[0].beta_alt, 2.0,
+             "mapped ALT beta");
+  std::filesystem::remove_all(directory);
+}
+
 void WriteZstd(const std::filesystem::path& path, const std::string& contents) {
   std::vector<char> compressed(ZSTD_compressBound(contents.size()));
   const size_t compressed_size =
@@ -165,6 +201,7 @@ int main() {
     TestDenseKernel();
     TestSparseKernel();
     TestCatalogOrientation();
+    TestVariantMapping();
     TestFrequencyParsing();
     TestPfileList();
     std::cout << "all unit tests passed\n";

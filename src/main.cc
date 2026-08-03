@@ -28,6 +28,7 @@ struct Options {
   std::string psam;
   std::string pfile_list;
   std::string manifest;
+  std::string variant_map;
   std::string read_freq;
   std::string out;
   bool error_on_missing_freq = false;
@@ -61,9 +62,11 @@ void PrintUsage(std::ostream& stream) {
   stream <<
       "Usage:\n"
       "  pgensparsescore --pgen FILE --pvar FILE --psam FILE \\\n"
-      "                     --manifest FILE [--read-freq FILE] \\\n"
+      "                     --manifest FILE [--variant-map FILE] \\\n"
+      "                     [--read-freq FILE] \\\n"
       "                     [--error-on-missing-freq] --out PREFIX\n"
       "  pgensparsescore --pfile-list FILE --manifest FILE \\\n"
+      "                     [--variant-map FILE] \\\n"
       "                     [--read-freq FILE] \\\n"
       "                     [--error-on-missing-freq] --out PREFIX\n";
 }
@@ -80,6 +83,7 @@ Options ParseOptions(int argc, char** argv) {
       {"--psam", &options.psam},
       {"--pfile-list", &options.pfile_list},
       {"--manifest", &options.manifest},
+      {"--variant-map", &options.variant_map},
       {"--read-freq", &options.read_freq},
       {"--out", &options.out},
   };
@@ -251,6 +255,7 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
 
 void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    uint32_t pgen_ct, uint64_t frequency_row_ct,
+                   uint64_t variant_mapping_row_ct,
                    bool error_on_missing_frequency,
                    uint64_t working_matrix_byte_ct,
                    const pgensparsescore::Catalog& catalog,
@@ -282,6 +287,8 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"score_columns\": " << catalog.scores.size() << ",\n"
            << "  \"pgen_inputs\": " << pgen_ct << ",\n"
            << "  \"frequency_rows\": " << frequency_row_ct << ",\n"
+           << "  \"variant_mapping_rows\": " << variant_mapping_row_ct
+           << ",\n"
            << "  \"error_on_missing_frequency\": "
            << (error_on_missing_frequency ? "true" : "false") << ",\n"
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
@@ -319,6 +326,10 @@ int main(int argc, char** argv) {
     if (!options.read_freq.empty()) {
       frequencies = pgensparsescore::ReadFrequencyTable(options.read_freq);
     }
+    std::optional<pgensparsescore::VariantMap> variant_map;
+    if (!options.variant_map.empty()) {
+      variant_map = pgensparsescore::ReadVariantMap(options.variant_map);
+    }
 
     auto samples = pgensparsescore::ReadPsam(inputs.front().psam);
     std::vector<pgensparsescore::Variant> all_variants;
@@ -346,8 +357,9 @@ int main(int argc, char** argv) {
         local_index_by_variant.push_back(local_idx);
       }
     }
-    auto catalog =
-        pgensparsescore::CompileCatalog(options.manifest, all_variants);
+    auto catalog = pgensparsescore::CompileCatalog(
+        options.manifest, all_variants,
+        variant_map ? &*variant_map : nullptr);
     auto catalog_by_input =
         PartitionCatalog(&catalog, input_by_variant, local_index_by_variant,
                          inputs.size());
@@ -401,6 +413,7 @@ int main(int argc, char** argv) {
     remove_working.RemoveNow();
     WriteMetadata(options.out, samples.size(), samples.front().fid.has_value(),
                   inputs.size(), frequencies ? frequencies->size() : 0,
+                  variant_map ? variant_map->size() : 0,
                   options.error_on_missing_freq, working_matrix_byte_ct,
                   catalog, stats);
     std::cerr << "wrote " << catalog.scores.size()
