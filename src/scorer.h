@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "frequency.h"
 #include "mapped_matrix.h"
 #include "pgen_reader.h"
 #include "types.h"
@@ -18,7 +19,10 @@ void ApplySparseDosage(double common, double mean,
                        const std::vector<Edge>& edges,
                        std::vector<double>* baselines,
                        MappedMatrix* matrix);
-ScoreRunStats ScoreCatalog(const Catalog& catalog, PgenDosageReader* reader,
-                           MappedMatrix* matrix);
+ScoreRunStats ScoreCatalog(const Catalog& catalog,
+                           const std::vector<Variant>& variants,
+                           const FrequencyTable* frequencies,
+                           bool error_on_missing_frequency,
+                           PgenDosageReader* reader, MappedMatrix* matrix);
 
 }  // namespace pgensparsescore

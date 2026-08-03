@@ -90,7 +90,8 @@ PgenDosageReader::~PgenDosageReader() {
   if (difflist_sample_ids_) aligned_free(difflist_sample_ids_);
 }
 
-DosageView PgenDosageReader::Read(uint32_t variant_idx) {
+DosageView PgenDosageReader::Read(uint32_t variant_idx,
+                                  std::optional<double> imputation_mean) {
   using namespace plink2;
   if (variant_idx >= variant_ct_) {
     throw std::out_of_range("PGEN variant index out of range");
@@ -132,33 +133,47 @@ DosageView PgenDosageReader::Read(uint32_t variant_idx) {
         sum += static_cast<double>(dosage_main_[idx]) / 16384.0;
       }
     }
-    if (!nonmissing_ct) {
+    if (!nonmissing_ct && !imputation_mean.has_value()) {
       throw std::runtime_error("scored PGEN variant " +
                                std::to_string(variant_idx) +
                                " is missing in every sample");
     }
-    result.mean = sum / static_cast<double>(nonmissing_ct);
+    result.mean = imputation_mean.has_value()
+                      ? *imputation_mean
+                      : sum / static_cast<double>(nonmissing_ct);
     result.common = common_missing
                         ? result.mean
                         : static_cast<double>(common_dosage16) / 16384.0;
     return result;
   }
 
-  if (Dosage16ToDoublesMeanimpute(genovec_, dosage_present_, dosage_main_,
-                                  sample_ct_, dosage_ct,
-                                  dense_values_.data())) {
+  Dosage16ToDoublesMinus9(genovec_, dosage_present_, dosage_main_, sample_ct_,
+                          dosage_ct, dense_values_.data());
+  result.missing_ct = 0;
+  double sum = 0.0;
+  uint32_t nonmissing_ct = 0;
+  for (uint32_t idx = 0; idx < sample_ct_; ++idx) {
+    if (dense_values_[idx] == -9.0) {
+      ++result.missing_ct;
+    } else {
+      sum += dense_values_[idx];
+      ++nonmissing_ct;
+    }
+  }
+  if (!nonmissing_ct && !imputation_mean.has_value()) {
     throw std::runtime_error("scored PGEN variant " +
                              std::to_string(variant_idx) +
                              " is missing in every sample");
   }
-  result.dense_values = dense_values_.data();
-  result.missing_ct = 0;
-  for (uint32_t idx = 0; idx < sample_ct_; ++idx) {
-    if (GetNyparrEntry(genovec_, idx) == 3 &&
-        !IsSet(dosage_present_, idx)) {
-      ++result.missing_ct;
+  const double mean = imputation_mean.has_value()
+                          ? *imputation_mean
+                          : sum / static_cast<double>(nonmissing_ct);
+  for (double& value : dense_values_) {
+    if (value == -9.0) {
+      value = mean;
     }
   }
+  result.dense_values = dense_values_.data();
   return result;
 }
 

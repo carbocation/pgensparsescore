@@ -2,6 +2,7 @@
 #include "scorer.h"
 
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 
 namespace pgensparsescore {
@@ -35,8 +36,11 @@ void ApplySparseDosage(double common, double mean,
   }
 }
 
-ScoreRunStats ScoreCatalog(const Catalog& catalog, PgenDosageReader* reader,
-                           MappedMatrix* matrix) {
+ScoreRunStats ScoreCatalog(const Catalog& catalog,
+                           const std::vector<Variant>& variants,
+                           const FrequencyTable* frequencies,
+                           bool error_on_missing_frequency,
+                           PgenDosageReader* reader, MappedMatrix* matrix) {
   if (matrix->row_ct() != catalog.scores.size() ||
       matrix->column_ct() != reader->sample_ct()) {
     throw std::runtime_error("score matrix shape does not match catalog/PGEN");
@@ -46,7 +50,34 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog, PgenDosageReader* reader,
   stats.variant_ct = catalog.variants.size();
   uint64_t processed = 0;
   for (const VariantEdges& variant : catalog.variants) {
-    const DosageView dosage = reader->Read(variant.variant_idx);
+    const Variant& variant_metadata = variants.at(variant.variant_idx);
+    std::optional<double> imputation_mean;
+    if (frequencies) {
+      const auto frequency = frequencies->find(variant_metadata.id);
+      if (frequency == frequencies->end()) {
+        ++stats.missing_frequency_variant_ct;
+        if (error_on_missing_frequency) {
+          throw std::runtime_error("frequency file has no row for scored variant " +
+                                   variant_metadata.id);
+        }
+        ++stats.cohort_frequency_variant_ct;
+      } else {
+        if (frequency->second.ref != variant_metadata.ref ||
+            frequency->second.alt != variant_metadata.alt) {
+          throw std::runtime_error(
+              "frequency alleles disagree with PVAR for " +
+              variant_metadata.id + " (PVAR " + variant_metadata.ref + "/" +
+              variant_metadata.alt + ", frequency " + frequency->second.ref +
+              "/" + frequency->second.alt + ")");
+        }
+        imputation_mean = frequency->second.alt_dosage_mean;
+        ++stats.external_frequency_variant_ct;
+      }
+    } else {
+      ++stats.cohort_frequency_variant_ct;
+    }
+    const DosageView dosage =
+        reader->Read(variant.variant_idx, imputation_mean);
     stats.edge_ct += variant.edges.size();
     stats.imputed_value_ct += dosage.missing_ct;
     if (dosage.sparse) {

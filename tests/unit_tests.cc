@@ -7,9 +7,12 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <zstd.h>
 
 #include "catalog.h"
+#include "frequency.h"
 #include "mapped_matrix.h"
+#include "pfile.h"
 #include "scorer.h"
 
 namespace {
@@ -94,6 +97,67 @@ void TestCatalogOrientation() {
   std::filesystem::remove_all(directory);
 }
 
+void WriteZstd(const std::filesystem::path& path, const std::string& contents) {
+  std::vector<char> compressed(ZSTD_compressBound(contents.size()));
+  const size_t compressed_size =
+      ZSTD_compress(compressed.data(), compressed.size(), contents.data(),
+                    contents.size(), 1);
+  if (ZSTD_isError(compressed_size)) {
+    throw std::runtime_error("cannot create zstd test input");
+  }
+  std::ofstream output(path, std::ios::binary);
+  output.write(compressed.data(), static_cast<std::streamsize>(compressed_size));
+}
+
+void TestFrequencyParsing() {
+  const auto directory = TempPath("-frequency");
+  std::filesystem::create_directories(directory);
+  const std::string contents =
+      "#CHROM\tID\tREF\tALT\tREF_CT\tALT_CTS\tOBS_CT\n"
+      "1\tv1\tA\tG\t5\t1\t6\n"
+      "2\tv2\tC\tT\t0\tT=8\t8\n";
+  const auto plain_path = directory / "frequency.acount";
+  const auto zstd_path = directory / "frequency.acount.zst";
+  {
+    std::ofstream output(plain_path);
+    output << contents;
+  }
+  WriteZstd(zstd_path, contents);
+
+  for (const auto& path : {plain_path, zstd_path}) {
+    const auto frequencies =
+        pgensparsescore::ReadFrequencyTable(path.string());
+    if (frequencies.size() != 2 || frequencies.at("v1").ref != "A" ||
+        frequencies.at("v1").alt != "G") {
+      throw std::runtime_error("frequency metadata is wrong");
+    }
+    ExpectNear(frequencies.at("v1").alt_dosage_mean, 1.0 / 3.0,
+               "ALT count dosage mean");
+    ExpectNear(frequencies.at("v2").alt_dosage_mean, 2.0,
+               "allele=value ALT count dosage mean");
+  }
+  std::filesystem::remove_all(directory);
+}
+
+void TestPfileList() {
+  const auto directory = TempPath("-pfile-list");
+  std::filesystem::create_directories(directory / "inputs");
+  const auto list_path = directory / "pfiles.tsv";
+  {
+    std::ofstream output(list_path);
+    output << "PGEN\tPVAR\tPSAM\n"
+           << "inputs/chr1.pgen\tinputs/chr1.pvar.zst\tinputs/chr1.psam\n";
+  }
+  const auto inputs = pgensparsescore::ReadPfileList(list_path.string());
+  if (inputs.size() != 1 ||
+      inputs[0].pgen != (directory / "inputs/chr1.pgen").string() ||
+      inputs[0].pvar != (directory / "inputs/chr1.pvar.zst").string() ||
+      inputs[0].psam != (directory / "inputs/chr1.psam").string()) {
+    throw std::runtime_error("PGEN list path resolution is wrong");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 
 int main() {
@@ -101,6 +165,8 @@ int main() {
     TestDenseKernel();
     TestSparseKernel();
     TestCatalogOrientation();
+    TestFrequencyParsing();
+    TestPfileList();
     std::cout << "all unit tests passed\n";
     return 0;
   } catch (const std::exception& error) {

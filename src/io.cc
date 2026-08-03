@@ -18,16 +18,32 @@ bool EndsWith(const std::string& value, const std::string& suffix) {
 }  // namespace
 
 LineReader::LineReader(const std::string& path) : path_(path) {
-  gzip_ = EndsWith(path, ".gz");
-  if (gzip_) {
+  if (EndsWith(path, ".gz")) {
+    mode_ = Mode::kGzip;
     gz_ = gzopen(path.c_str(), "rb");
     if (!gz_) {
       throw std::runtime_error("cannot open " + path);
     }
   } else {
-    plain_.open(path);
+    mode_ = EndsWith(path, ".zst") ? Mode::kZstd : Mode::kPlain;
+    plain_.open(path, std::ios::binary);
     if (!plain_) {
       throw std::runtime_error("cannot open " + path);
+    }
+    if (mode_ == Mode::kZstd) {
+      zstd_ = ZSTD_createDStream();
+      if (!zstd_) {
+        throw std::bad_alloc();
+      }
+      const size_t result = ZSTD_initDStream(zstd_);
+      if (ZSTD_isError(result)) {
+        ZSTD_freeDStream(zstd_);
+        zstd_ = nullptr;
+        throw std::runtime_error("cannot initialize zstd reader for " + path +
+                                 ": " + ZSTD_getErrorName(result));
+      }
+      zstd_input_.resize(ZSTD_DStreamInSize());
+      zstd_output_.resize(ZSTD_DStreamOutSize());
     }
   }
 }
@@ -36,11 +52,17 @@ LineReader::~LineReader() {
   if (gz_) {
     gzclose(gz_);
   }
+  if (zstd_) {
+    ZSTD_freeDStream(zstd_);
+  }
 }
 
 bool LineReader::GetLine(std::string* line) {
   line->clear();
-  if (!gzip_) {
+  if (mode_ == Mode::kZstd) {
+    return GetZstdLine(line);
+  }
+  if (mode_ == Mode::kPlain) {
     if (!std::getline(plain_, *line)) {
       return false;
     }
@@ -73,6 +95,64 @@ bool LineReader::GetLine(std::string* line) {
     line->pop_back();
   }
   return true;
+}
+
+bool LineReader::GetZstdLine(std::string* line) {
+  while (true) {
+    const size_t newline = zstd_pending_.find('\n', zstd_pending_pos_);
+    if (newline != std::string::npos) {
+      *line = zstd_pending_.substr(zstd_pending_pos_,
+                                  newline - zstd_pending_pos_);
+      zstd_pending_pos_ = newline + 1;
+      if (!line->empty() && line->back() == '\r') {
+        line->pop_back();
+      }
+      return true;
+    }
+    if (zstd_finished_) {
+      if (zstd_pending_pos_ == zstd_pending_.size()) {
+        return false;
+      }
+      *line = zstd_pending_.substr(zstd_pending_pos_);
+      zstd_pending_.clear();
+      zstd_pending_pos_ = 0;
+      if (!line->empty() && line->back() == '\r') {
+        line->pop_back();
+      }
+      return true;
+    }
+    if (zstd_input_pos_ == zstd_input_size_ && !zstd_input_eof_) {
+      plain_.read(zstd_input_.data(),
+                  static_cast<std::streamsize>(zstd_input_.size()));
+      zstd_input_size_ = static_cast<size_t>(plain_.gcount());
+      zstd_input_pos_ = 0;
+      if (!zstd_input_size_) {
+        zstd_input_eof_ = true;
+      }
+    }
+    if (zstd_input_eof_ && zstd_input_pos_ == zstd_input_size_) {
+      if (zstd_hint_ != 0) {
+        throw std::runtime_error("truncated zstd stream in " + path_);
+      }
+      zstd_finished_ = true;
+      continue;
+    }
+
+    if (zstd_pending_pos_) {
+      zstd_pending_.erase(0, zstd_pending_pos_);
+      zstd_pending_pos_ = 0;
+    }
+
+    ZSTD_inBuffer input{zstd_input_.data(), zstd_input_size_, zstd_input_pos_};
+    ZSTD_outBuffer output{zstd_output_.data(), zstd_output_.size(), 0};
+    zstd_hint_ = ZSTD_decompressStream(zstd_, &output, &input);
+    if (ZSTD_isError(zstd_hint_)) {
+      throw std::runtime_error("error reading " + path_ + ": " +
+                               ZSTD_getErrorName(zstd_hint_));
+    }
+    zstd_input_pos_ = input.pos;
+    zstd_pending_.append(zstd_output_.data(), output.pos);
+  }
 }
 
 GzipWriter::GzipWriter(const std::string& path) : path_(path) {

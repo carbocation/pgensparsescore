@@ -51,16 +51,25 @@ target_compile_options(pgenlib PRIVATE
 )
 
 find_package(ZLIB REQUIRED)
+find_path(ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
+find_library(ZSTD_LIBRARY NAMES zstd libzstd REQUIRED)
+add_library(ZSTD::ZSTD UNKNOWN IMPORTED)
+set_target_properties(ZSTD::ZSTD PROPERTIES
+  IMPORTED_LOCATION "${ZSTD_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}"
+)
 
 add_library(pgensparsescore_lib
   src/catalog.cc
+  src/frequency.cc
   src/io.cc
   src/mapped_matrix.cc
+  src/pfile.cc
   src/pgen_reader.cc
   src/scorer.cc
 )
 target_include_directories(pgensparsescore_lib PUBLIC src)
-target_link_libraries(pgensparsescore_lib PUBLIC pgenlib ZLIB::ZLIB)
+target_link_libraries(pgensparsescore_lib PUBLIC pgenlib ZLIB::ZLIB ZSTD::ZSTD)
 target_compile_options(pgensparsescore_lib PRIVATE
   $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>
 )

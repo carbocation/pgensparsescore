@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,8 @@ class PgenDosageReader {
 
   uint32_t sample_ct() const { return sample_ct_; }
   uint32_t variant_ct() const { return variant_ct_; }
-  DosageView Read(uint32_t variant_idx);
+  DosageView Read(uint32_t variant_idx,
+                  std::optional<double> imputation_mean = std::nullopt);
 
  private:
   plink2::PgenFileInfo pgfi_{};
