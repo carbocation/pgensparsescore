@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import json
 import math
 import pathlib
 import subprocess
@@ -176,6 +177,51 @@ def main() -> None:
                      "multi-PGEN score2")
         if multi_output.with_suffix(".work.score-major.bin").exists():
             raise AssertionError("working score-major matrix was not removed")
+
+        (tmp / "mapped-score1.tsv").write_text(
+            WEIGHT_HEADER + "source-v1\tG\tA\t2\n" + "source-v2\tC\tT\t3\n"
+        )
+        (tmp / "mapped-score2.tsv").write_text(
+            WEIGHT_HEADER + "source-v1\tA\tG\t1\n"
+        )
+        (tmp / "mapped-manifest.tsv").write_text(
+            "SCORE\tPATH\nscore1\tmapped-score1.tsv\nscore2\tmapped-score2.tsv\n"
+        )
+        (tmp / "variant-map.tsv").write_text(
+            "SOURCE_ID\tTARGET_ID\nsource-v1\tv1\nsource-v2\tv2\n"
+        )
+        mapped_output = tmp / "mapped-result"
+        run(
+            args.scorer,
+            "--pfile-list",
+            str(tmp / "pfiles.tsv"),
+            "--manifest",
+            str(tmp / "mapped-manifest.tsv"),
+            "--variant-map",
+            str(tmp / "variant-map.tsv"),
+            "--read-freq",
+            str(frequency_path),
+            "--error-on-missing-freq",
+            "--out",
+            str(mapped_output),
+        )
+        with gzip.open(
+            mapped_output.with_suffix(".scores.tsv.gz"), "rt", newline=""
+        ) as handle:
+            mapped_rows = list(csv.DictReader(handle, delimiter="\t"))
+        assert_close(
+            [float(row["score1"]) for row in mapped_rows],
+            score_results["multi"][0],
+            "variant-map score1",
+        )
+        assert_close(
+            [float(row["score2"]) for row in mapped_rows],
+            score_results["multi"][1],
+            "variant-map score2",
+        )
+        mapped_metadata = json.loads(mapped_output.with_suffix(".json").read_text())
+        if mapped_metadata["variant_mapping_rows"] != 2:
+            raise AssertionError("variant mapping row count is absent from metadata")
 
         missing_frequency = tmp / "missing.acount"
         missing_frequency.write_text(
