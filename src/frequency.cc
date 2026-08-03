@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
 #include <unordered_map>

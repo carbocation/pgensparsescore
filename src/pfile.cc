@@ -2,6 +2,7 @@
 #include "pfile.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <stdexcept>
 #include <unordered_map>
