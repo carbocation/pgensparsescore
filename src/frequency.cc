@@ -73,6 +73,11 @@ double ParseNumber(const std::string& value, const std::string& path,
   return parsed;
 }
 
+bool IsMissing(const std::string& value) {
+  const std::string upper = Upper(value);
+  return value == "." || upper == "NA" || upper == "NAN";
+}
+
 double ParseBiallelicValue(const std::string& raw, const std::string& alt,
                            const std::string& path, uint64_t line_number,
                            const std::string& column) {
@@ -162,18 +167,30 @@ FrequencyTable ReadFrequencyTable(
 
     double alt_dosage_mean = 0.0;
     if (mean_idx != static_cast<size_t>(-1)) {
+      if (IsMissing(fields[mean_idx])) {
+        continue;
+      }
       alt_dosage_mean = ParseNumber(fields[mean_idx], path, line_number,
                                     "ALT_DOSAGE_MEAN");
     } else if (freq_idx != static_cast<size_t>(-1)) {
+      if (IsMissing(fields[freq_idx])) {
+        continue;
+      }
       alt_dosage_mean = 2.0 * ParseBiallelicValue(
           fields[freq_idx], alt, path, line_number, "ALT_FREQS");
     } else {
+      if (IsMissing(fields[obs_idx])) {
+        continue;
+      }
       const double observations =
           ParseNumber(fields[obs_idx], path, line_number, "OBS_CT");
-      if (observations <= 0.0) {
+      if (observations == 0.0) {
+        continue;
+      }
+      if (observations < 0.0) {
         throw std::runtime_error(path + ": line " +
                                  std::to_string(line_number) +
-                                 " has nonpositive OBS_CT");
+                                 " has negative OBS_CT");
       }
       const double alt_count =
           alt_count_idx != static_cast<size_t>(-1)

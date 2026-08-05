@@ -174,7 +174,8 @@ void TestFrequencyParsing() {
   const std::string contents =
       "#CHROM\tID\tREF\tALT\tREF_CT\tALT_CTS\tOBS_CT\n"
       "1\tv1\tA\tG\t5\t1\t6\n"
-      "2\tv2\tC\tT\t0\tT=8\t8\n";
+      "2\tv2\tC\tT\t0\tT=8\t8\n"
+      "3\tall-missing\tG\tA\t0\t0\t0\n";
   const auto plain_path = directory / "frequency.acount";
   const auto zstd_path = directory / "frequency.acount.zst";
   {
