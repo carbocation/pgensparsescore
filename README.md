@@ -73,14 +73,20 @@ records its dimensions.
 
 ## Inputs
 
-The score manifest is a tab-separated file with `SCORE` and `PATH` columns.
-Relative paths are resolved relative to the manifest.
+The compact score manifest is a tab-separated file with `SCORE` and `PATH`
+columns. Relative paths are resolved relative to the manifest.
 
 ```text
 SCORE\tPATH
 score_a\tweights/score_a.tsv.gz
 score_b\tweights/score_b.tsv.gz
 ```
+
+Compiler manifests may instead provide `SCORE_ID`, `COLUMN_NAME`,
+`DISPLAY_NAME`, and `PATH`. `COLUMN_NAME` is then used for the score-table
+column. This keeps the source identifier and descriptive label in the manifest
+while using an analysis-safe name in Parquet and R. Older `SCORE` and
+`SCORE_ID` manifests remain accepted.
 
 Each weight file is a tab-separated plain-text, gzip-compressed, or
 zstd-compressed file with these columns:

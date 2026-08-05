@@ -146,13 +146,16 @@ void TestCatalogOrientation() {
   }
   {
     std::ofstream output(manifest_path);
-    output << "SCORE\tPATH\nscore1\tweights.tsv\n";
+    output << "SCORE_ID\tCOLUMN_NAME\tDISPLAY_NAME\tPATH\n"
+           << "source:score1\tsource__score1\tsource__score1__Trait"
+              "\tweights.tsv\n";
   }
   const std::vector<pgensparsescore::Variant> variants{
       {"1", "v1", "A", "G"}, {"1", "v2", "C", "T"}};
   const auto catalog =
       pgensparsescore::CompileCatalog(manifest_path.string(), variants);
-  if (catalog.scores.size() != 1 || catalog.variants.size() != 2) {
+  if (catalog.scores.size() != 1 || catalog.variants.size() != 2 ||
+      catalog.scores[0].id != "source__score1") {
     throw std::runtime_error("catalog dimensions are wrong");
   }
   ExpectNear(catalog.intercepts[0], 6.0, "REF effect intercept");

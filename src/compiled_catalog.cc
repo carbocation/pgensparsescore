@@ -47,13 +47,14 @@ size_t RequireColumn(const Header& header, const std::string& name,
 }
 
 size_t FindScoreColumn(const Header& header, const std::string& path) {
-  for (const char* name : {"SCORE", "SCORE_ID"}) {
+  for (const char* name : {"COLUMN_NAME", "SCORE", "SCORE_ID"}) {
     const auto iter = header.find(name);
     if (iter != header.end()) {
       return iter->second;
     }
   }
-  throw std::runtime_error(path + " is missing SCORE or SCORE_ID");
+  throw std::runtime_error(path +
+                           " is missing COLUMN_NAME, SCORE, or SCORE_ID");
 }
 
 void RequireFields(const std::vector<std::string>& fields, size_t index,
