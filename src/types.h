@@ -38,6 +38,7 @@ struct ScoreInfo {
   uint64_t input_weight_ct = 0;
   uint64_t zero_weight_ct = 0;
   uint64_t excluded_weight_ct = 0;
+  uint64_t duplicate_weight_ct = 0;
   uint64_t catalog_weight_ct = 0;
   uint64_t matched_weight_ct = 0;
   uint64_t missing_variant_ct = 0;

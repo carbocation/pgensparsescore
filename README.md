@@ -47,6 +47,10 @@ included in the catalog; its `TARGET_ID` values are not stored. Weight-zero
 rows are recorded in QC counts and omitted from the catalog. Without a variant
 map, every nonzero weight in the manifest is included.
 
+Repeated rows for the same variant within one score are retained, so their
+contributions add just as they do in the source score. Rows after the first are
+also counted as duplicates in the score metadata.
+
 Score a cohort by supplying the compiled catalog in place of the manifest:
 
 ```sh
@@ -215,7 +219,7 @@ sample2\t0.5\t0.25
 Additional outputs are:
 
 - `catalog.score-metadata.tsv`: score order, weight inclusion, matching,
-  frequency omission, and allele-orientation counts.
+  repeated variants, frequency omission, and allele-orientation counts.
 - `catalog.json`: output dimensions and run-level counters.
 
 The JSON also records `variant_mapping_rows` (zero when `--variant-map` is not

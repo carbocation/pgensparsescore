@@ -360,14 +360,15 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
     output << "INDEX\tSCORE\tINPUT_WEIGHTS\tZERO_WEIGHTS"
-              "\tEXCLUDED_WEIGHTS\tCATALOG_WEIGHTS\tMATCHED_WEIGHTS"
+              "\tEXCLUDED_WEIGHTS\tDUPLICATE_WEIGHTS\tCATALOG_WEIGHTS\tMATCHED_WEIGHTS"
               "\tMISSING_VARIANTS\tMISSING_FREQUENCIES\tSCORED_WEIGHTS"
               "\tALT_EFFECTS\tREF_EFFECTS\tREF_INTERCEPT\n";
     for (uint32_t idx = 0; idx < catalog.scores.size(); ++idx) {
       const auto& score = catalog.scores[idx];
       output << idx << '\t' << score.id << '\t' << score.input_weight_ct << '\t'
              << score.zero_weight_ct << '\t' << score.excluded_weight_ct << '\t'
-             << score.catalog_weight_ct << '\t' << score.matched_weight_ct
+             << score.duplicate_weight_ct << '\t' << score.catalog_weight_ct
+             << '\t' << score.matched_weight_ct
              << '\t' << score.missing_variant_ct << '\t'
              << score.missing_frequency_ct << '\t'
              << (score.matched_weight_ct - score.missing_frequency_ct)
@@ -423,8 +424,12 @@ void WriteCompiledCatalogMetadata(
   if (!output) {
     throw std::runtime_error("cannot write compiled-catalog metadata");
   }
+  uint64_t duplicate_weight_ct = 0;
+  for (const auto& score : catalog.scores) {
+    duplicate_weight_ct += score.duplicate_weight_ct;
+  }
   output << "{\n"
-         << "  \"format\": \"pgensparsescore-compiled-catalog-v1\",\n"
+         << "  \"format\": \"pgensparsescore-compiled-catalog-v2\",\n"
          << "  \"path\": \""
          << pgensparsescore::JsonEscape(
                 std::filesystem::path(path).filename().string())
@@ -432,6 +437,7 @@ void WriteCompiledCatalogMetadata(
          << "  \"scores\": " << catalog.scores.size() << ",\n"
          << "  \"variants\": " << catalog.variants.size() << ",\n"
          << "  \"weights\": " << catalog.weight_ct << ",\n"
+         << "  \"duplicate_weights\": " << duplicate_weight_ct << ",\n"
          << "  \"included_source_variants\": "
          << included_source_variant_ct << "\n"
          << "}\n";

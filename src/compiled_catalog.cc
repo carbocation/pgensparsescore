@@ -20,7 +20,7 @@ namespace {
 
 using Header = std::unordered_map<std::string, size_t>;
 constexpr char kMagic[] = {'P', 'G', 'S', 'S', 'C', 'A', 'T', '1'};
-constexpr uint32_t kFormatVersion = 1;
+constexpr uint32_t kFormatVersion = 2;
 constexpr uint32_t kMaximumStringBytes = 1U << 28;
 
 Header MakeHeader(const std::vector<std::string>& fields) {
@@ -269,11 +269,6 @@ CompiledCatalog CompileSourceCatalog(
         ++info.excluded_weight_ct;
         continue;
       }
-      if (!score_variants.insert(source_id).second) {
-        throw std::runtime_error(item.resolved_path + ": line " +
-                                 std::to_string(line_number) +
-                                 " duplicates variant " + source_id);
-      }
       const std::string& effect = fields[effect_idx];
       const std::string& other = fields[other_idx];
       if (source_id.empty() || effect.empty() || other.empty() ||
@@ -281,6 +276,9 @@ CompiledCatalog CompileSourceCatalog(
         throw std::runtime_error(item.resolved_path + ": line " +
                                  std::to_string(line_number) +
                                  " has invalid variant ID or allele pair");
+      }
+      if (!score_variants.insert(source_id).second) {
+        ++info.duplicate_weight_ct;
       }
       const std::string allele0 = std::min(effect, other);
       const std::string allele1 = std::max(effect, other);
@@ -343,6 +341,7 @@ void WriteCompiledCatalog(const std::string& path,
     WriteU64(&output, score.input_weight_ct);
     WriteU64(&output, score.zero_weight_ct);
     WriteU64(&output, score.excluded_weight_ct);
+    WriteU64(&output, score.duplicate_weight_ct);
     WriteU64(&output, score.catalog_weight_ct);
   }
   for (const auto& variant : catalog.variants) {
@@ -373,7 +372,8 @@ CompiledCatalog ReadCompiledCatalog(const std::string& path) {
   if (std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) {
     throw std::runtime_error(path + " is not a pgensparsescore catalog");
   }
-  if (ReadU32(&input, path) != kFormatVersion) {
+  const uint32_t format_version = ReadU32(&input, path);
+  if (format_version != 1 && format_version != kFormatVersion) {
     throw std::runtime_error(path + " has an unsupported catalog version");
   }
   const uint32_t score_ct = ReadU32(&input, path);
@@ -394,6 +394,9 @@ CompiledCatalog ReadCompiledCatalog(const std::string& path) {
     score.input_weight_ct = ReadU64(&input, path);
     score.zero_weight_ct = ReadU64(&input, path);
     score.excluded_weight_ct = ReadU64(&input, path);
+    if (format_version >= 2) {
+      score.duplicate_weight_ct = ReadU64(&input, path);
+    }
     score.catalog_weight_ct = ReadU64(&input, path);
     result.scores.push_back(std::move(score));
   }
@@ -403,8 +406,8 @@ CompiledCatalog ReadCompiledCatalog(const std::string& path) {
     variant.allele0 = ReadString(&input, path);
     variant.allele1 = ReadString(&input, path);
     const uint64_t weight_ct = ReadU64(&input, path);
-    if (weight_ct > score_ct) {
-      throw std::runtime_error(path + " has too many weights for one variant");
+    if (weight_ct > expected_weight_ct) {
+      throw std::runtime_error(path + " has an invalid variant weight count");
     }
     variant.weights.reserve(static_cast<size_t>(weight_ct));
     uint32_t previous_score_idx = 0;
@@ -413,7 +416,7 @@ CompiledCatalog ReadCompiledCatalog(const std::string& path) {
       const uint8_t effect_allele_idx = ReadU8(&input, path);
       const double weight = ReadDouble(&input, path);
       if (score_idx >= score_ct || effect_allele_idx > 1 ||
-          (weight_idx && score_idx <= previous_score_idx)) {
+          (weight_idx && score_idx < previous_score_idx)) {
         throw std::runtime_error(path + " contains an invalid weight record");
       }
       previous_score_idx = score_idx;

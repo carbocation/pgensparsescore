@@ -11,6 +11,7 @@
 #include <zstd.h>
 
 #include "catalog.h"
+#include "compiled_catalog.h"
 #include "frequency.h"
 #include "mapped_matrix.h"
 #include "pfile.h"
@@ -95,6 +96,52 @@ void TestCatalogOrientation() {
   if (catalog.scores[0].missing_variant_ct != 1) {
     throw std::runtime_error("missing variant count is wrong");
   }
+  std::filesystem::remove_all(directory);
+}
+
+void TestRepeatedWeightRowsAreRetained() {
+  const auto directory = TempPath("-duplicate-weight");
+  std::filesystem::create_directories(directory);
+  const auto weight_path = directory / "weights.tsv";
+  const auto manifest_path = directory / "manifest.tsv";
+  const auto catalog_path = directory / "catalog.bin";
+  {
+    std::ofstream output(weight_path);
+    output << "SNP\tEFFECT_ALLELE\tOTHER_ALLELE\tEFFECT_ALLELE_WEIGHT\n"
+           << "v1\tG\tA\t2\n"
+           << "v1\tG\tA\t3\n";
+  }
+  {
+    std::ofstream output(manifest_path);
+    output << "SCORE\tPATH\nscore1\tweights.tsv\n";
+  }
+  const auto compiled =
+      pgensparsescore::CompileSourceCatalog(manifest_path.string());
+  if (compiled.weight_ct != 2 || compiled.variants.size() != 1 ||
+      compiled.scores[0].input_weight_ct != 2 ||
+      compiled.scores[0].duplicate_weight_ct != 1 ||
+      compiled.scores[0].catalog_weight_ct != 2 ||
+      compiled.variants[0].weights.size() != 2) {
+    throw std::runtime_error("repeated weight rows were not retained");
+  }
+  pgensparsescore::WriteCompiledCatalog(catalog_path.string(), compiled);
+  const auto round_trip =
+      pgensparsescore::ReadCompiledCatalog(catalog_path.string());
+  if (round_trip.scores[0].duplicate_weight_ct != 1 ||
+      round_trip.weight_ct != 2 || round_trip.variants[0].weights.size() != 2) {
+    throw std::runtime_error("duplicate count did not survive round trip");
+  }
+  const std::vector<pgensparsescore::Variant> variants{
+      {"1", "v1", "A", "G"}};
+  const auto materialized =
+      pgensparsescore::MaterializeCompiledCatalog(round_trip, variants, nullptr);
+  if (materialized.scores[0].matched_weight_ct != 2 ||
+      materialized.variants[0].edges.size() != 2) {
+    throw std::runtime_error("repeated rows were not materialized");
+  }
+  ExpectNear(materialized.variants[0].edges[0].beta_alt +
+                 materialized.variants[0].edges[1].beta_alt,
+             5.0, "repeated row coefficient sum");
   std::filesystem::remove_all(directory);
 }
 
@@ -225,6 +272,7 @@ int main() {
     TestDenseKernel();
     TestSparseKernel();
     TestCatalogOrientation();
+    TestRepeatedWeightRowsAreRetained();
     TestVariantMapping();
     TestFilteredPvarKeepsPgenIndexes();
     TestFrequencyParsing();
