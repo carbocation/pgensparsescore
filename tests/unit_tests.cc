@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <unistd.h>
 #include <vector>
 #include <zstd.h>
@@ -133,6 +134,28 @@ void TestVariantMapping() {
   std::filesystem::remove_all(directory);
 }
 
+void TestFilteredPvarKeepsPgenIndexes() {
+  const auto directory = TempPath("-filtered-pvar");
+  std::filesystem::create_directories(directory);
+  const auto pvar_path = directory / "source.pvar";
+  {
+    std::ofstream output(pvar_path);
+    output << "#CHROM\tPOS\tID\tREF\tALT\n"
+           << "1\t100\tv1\tA\tG\n"
+           << "1\t200\tv2\tC\tT\n"
+           << "2\t300\tv3\tG\tA\n";
+  }
+  const std::unordered_set<std::string> included{"v2"};
+  const auto pvar =
+      pgensparsescore::ReadPvar(pvar_path.string(), &included);
+  if (pvar.row_ct != 3 || pvar.variants.size() != 1 ||
+      pvar.variants[0].id != "v2" ||
+      pvar.variants[0].pgen_variant_idx != 1) {
+    throw std::runtime_error("filtered PVAR did not retain source row index");
+  }
+  std::filesystem::remove_all(directory);
+}
+
 void WriteZstd(const std::filesystem::path& path, const std::string& contents) {
   std::vector<char> compressed(ZSTD_compressBound(contents.size()));
   const size_t compressed_size =
@@ -202,6 +225,7 @@ int main() {
     TestSparseKernel();
     TestCatalogOrientation();
     TestVariantMapping();
+    TestFilteredPvarKeepsPgenIndexes();
     TestFrequencyParsing();
     TestPfileList();
     std::cout << "all unit tests passed\n";

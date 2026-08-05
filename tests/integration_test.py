@@ -223,6 +223,44 @@ def main() -> None:
         if mapped_metadata["variant_mapping_rows"] != 2:
             raise AssertionError("variant mapping row count is absent from metadata")
 
+        (tmp / "late-score.tsv").write_text(
+            WEIGHT_HEADER + "source-v2\tC\tT\t3\n"
+        )
+        (tmp / "late-manifest.tsv").write_text(
+            "SCORE\tPATH\nlate\tlate-score.tsv\n"
+        )
+        (tmp / "late-map.tsv").write_text(
+            "SOURCE_ID\tTARGET_ID\nsource-v2\tv2\n"
+        )
+        late_output = tmp / "late-result"
+        run(
+            args.scorer,
+            "--pgen",
+            str(pfile.with_suffix(".pgen")),
+            "--pvar",
+            str(pfile.with_suffix(".pvar")),
+            "--psam",
+            str(pfile.with_suffix(".psam")),
+            "--manifest",
+            str(tmp / "late-manifest.tsv"),
+            "--variant-map",
+            str(tmp / "late-map.tsv"),
+            "--read-freq",
+            str(frequency_path),
+            "--error-on-missing-freq",
+            "--out",
+            str(late_output),
+        )
+        with gzip.open(
+            late_output.with_suffix(".scores.tsv.gz"), "rt", newline=""
+        ) as handle:
+            late_rows = list(csv.DictReader(handle, delimiter="\t"))
+        assert_close(
+            [float(row["late"]) for row in late_rows],
+            [0.0, 0.0, 3.0, 0.0],
+            "filtered PVAR original PGEN index",
+        )
+
         missing_frequency = tmp / "missing.acount"
         missing_frequency.write_text(
             "#CHROM\tID\tREF\tALT\tREF_CT\tALT_CTS\tOBS_CT\n"

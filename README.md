@@ -85,6 +85,11 @@ mapped row is still required to have the exact PVAR REF/ALT allele pair. This
 keeps ID translation separate from allele interpretation and avoids creating
 a translated copy of every score file.
 
+When a map is supplied, the scorer scans each PVAR but retains metadata only
+for its `TARGET_ID` values. PGEN reads still use the original PVAR row numbers.
+This permits scoring a small mapped variant set from a much larger PGEN without
+first writing a subset PGEN.
+
 ## Run
 
 ```sh

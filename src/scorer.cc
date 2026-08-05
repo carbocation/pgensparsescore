@@ -77,7 +77,7 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
       ++stats.cohort_frequency_variant_ct;
     }
     const DosageView dosage =
-        reader->Read(variant.variant_idx, imputation_mean);
+        reader->Read(variant_metadata.pgen_variant_idx, imputation_mean);
     stats.edge_ct += variant.edges.size();
     stats.imputed_value_ct += dosage.missing_ct;
     if (dosage.sparse) {

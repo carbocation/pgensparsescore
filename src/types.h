@@ -13,6 +13,7 @@ struct Variant {
   std::string id;
   std::string ref;
   std::string alt;
+  uint32_t pgen_variant_idx = 0;
 };
 
 struct Sample {

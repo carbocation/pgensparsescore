@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -327,14 +328,21 @@ int main(int argc, char** argv) {
       frequencies = pgensparsescore::ReadFrequencyTable(options.read_freq);
     }
     std::optional<pgensparsescore::VariantMap> variant_map;
+    std::unordered_set<std::string> mapped_target_ids;
     if (!options.variant_map.empty()) {
       variant_map = pgensparsescore::ReadVariantMap(options.variant_map);
+      mapped_target_ids.reserve(variant_map->size());
+      for (const auto& [source_id, target_id] : *variant_map) {
+        static_cast<void>(source_id);
+        mapped_target_ids.insert(target_id);
+      }
     }
 
     auto samples = pgensparsescore::ReadPsam(inputs.front().psam);
     std::vector<pgensparsescore::Variant> all_variants;
     std::vector<uint32_t> input_by_variant;
     std::vector<uint32_t> local_index_by_variant;
+    std::vector<uint32_t> pvar_row_counts;
     for (uint32_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
       if (input_idx) {
         const auto input_samples =
@@ -345,14 +353,18 @@ int main(int argc, char** argv) {
               inputs[input_idx].psam);
         }
       }
-      auto variants = pgensparsescore::ReadPvar(inputs[input_idx].pvar);
-      if (all_variants.size() + variants.size() >
+      auto pvar = pgensparsescore::ReadPvar(
+          inputs[input_idx].pvar,
+          variant_map ? &mapped_target_ids : nullptr);
+      pvar_row_counts.push_back(pvar.row_ct);
+      if (all_variants.size() + pvar.variants.size() >
           std::numeric_limits<uint32_t>::max()) {
         throw std::runtime_error(
             "combined PVAR inputs exceed the supported variant count");
       }
-      for (uint32_t local_idx = 0; local_idx < variants.size(); ++local_idx) {
-        all_variants.push_back(std::move(variants[local_idx]));
+      for (uint32_t local_idx = 0; local_idx < pvar.variants.size();
+           ++local_idx) {
+        all_variants.push_back(std::move(pvar.variants[local_idx]));
         input_by_variant.push_back(input_idx);
         local_index_by_variant.push_back(local_idx);
       }
@@ -388,9 +400,10 @@ int main(int argc, char** argv) {
 
       auto process = [&](const pgensparsescore::PfileSpec& input,
                          const std::vector<pgensparsescore::Variant>& variants,
-                         const pgensparsescore::Catalog& input_catalog) {
+                         const pgensparsescore::Catalog& input_catalog,
+                         uint32_t pvar_row_ct) {
         pgensparsescore::PgenDosageReader reader(input.pgen);
-        if (reader.variant_ct() != variants.size()) {
+        if (reader.variant_ct() != pvar_row_ct) {
           throw std::runtime_error("PGEN/PVAR variant-count mismatch: " +
                                    input.pgen);
         }
@@ -406,7 +419,7 @@ int main(int argc, char** argv) {
 
       for (size_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
         process(inputs[input_idx], variants_by_input[input_idx],
-                catalog_by_input[input_idx]);
+                catalog_by_input[input_idx], pvar_row_counts[input_idx]);
       }
       WriteWideScores(options.out, samples, catalog, matrix);
     }

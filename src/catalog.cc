@@ -82,11 +82,13 @@ std::string FindFirst(const Header& header,
 
 }  // namespace
 
-std::vector<Variant> ReadPvar(const std::string& path) {
+PvarData ReadPvar(
+    const std::string& path,
+    const std::unordered_set<std::string>* included_ids) {
   LineReader reader(path);
   std::string line;
   Header header;
-  std::vector<Variant> variants;
+  PvarData result;
   uint64_t line_number = 0;
   while (reader.GetLine(&line)) {
     ++line_number;
@@ -104,16 +106,24 @@ std::vector<Variant> ReadPvar(const std::string& path) {
     const size_t alt_idx = RequireColumn(header, "ALT", path);
     const size_t max_idx = std::max({chrom_idx, id_idx, ref_idx, alt_idx});
     RequireFieldCount(fields, max_idx, path, line_number);
-    variants.push_back({fields[chrom_idx], fields[id_idx], fields[ref_idx],
-                        fields[alt_idx]});
+    if (result.row_ct == std::numeric_limits<uint32_t>::max()) {
+      throw std::runtime_error(path + " exceeds the supported PVAR row count");
+    }
+    const uint32_t pgen_variant_idx = result.row_ct++;
+    if (included_ids && !included_ids->count(fields[id_idx])) {
+      continue;
+    }
+    result.variants.push_back({fields[chrom_idx], fields[id_idx],
+                               fields[ref_idx], fields[alt_idx],
+                               pgen_variant_idx});
   }
   if (header.empty()) {
     throw std::runtime_error(path + " has no header");
   }
-  if (variants.empty()) {
+  if (!result.row_ct) {
     throw std::runtime_error(path + " has no variants");
   }
-  return variants;
+  return result;
 }
 
 std::vector<Sample> ReadPsam(const std::string& path) {
