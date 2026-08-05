@@ -9,46 +9,42 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(PLINK_NG_SOURCE_DIR "" CACHE PATH
+    "Path to a plink-ng checkout; the pinned repository is fetched when empty")
 set(PGENLIB_SOURCE_DIR "" CACHE PATH
-    "Path to plink-ng/2.0/include; the pinned repository is fetched when empty")
+    "Legacy path to plink-ng/2.0/include")
 
-if(NOT PGENLIB_SOURCE_DIR)
+if(PLINK_NG_SOURCE_DIR AND PGENLIB_SOURCE_DIR)
+  message(FATAL_ERROR
+    "Set only one of PLINK_NG_SOURCE_DIR and PGENLIB_SOURCE_DIR")
+endif()
+
+set(PGEN_RANS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(PGEN_RANS_INSTALL OFF CACHE BOOL "" FORCE)
+if(PLINK_NG_SOURCE_DIR OR PGENLIB_SOURCE_DIR)
+  if(PGENLIB_SOURCE_DIR)
+    get_filename_component(_plink_ng_2_dir "${PGENLIB_SOURCE_DIR}" DIRECTORY)
+    get_filename_component(_plink_ng_source_dir "${_plink_ng_2_dir}" DIRECTORY)
+  else()
+    set(_plink_ng_source_dir "${PLINK_NG_SOURCE_DIR}")
+  endif()
+  if(NOT EXISTS "${_plink_ng_source_dir}/2.0/pgen_rans_pgenlib.h")
+    message(FATAL_ERROR
+      "The configured plink-ng checkout does not export the rANS pgenlib adapter")
+  endif()
+  add_subdirectory(
+    "${_plink_ng_source_dir}"
+    "${CMAKE_CURRENT_BINARY_DIR}/plink_ng"
+  )
+else()
   FetchContent_Declare(
     plink_ng
     GIT_REPOSITORY https://github.com/carbocation/plink-ng.git
-    GIT_TAG 57b9e7d79ca51a7e66471927131af3a49ff5fa18
+    GIT_TAG 7fb5145936e72ec22a4902504a8bd8bb5e5477c3
     GIT_SHALLOW FALSE
   )
   FetchContent_MakeAvailable(plink_ng)
-  set(PGENLIB_SOURCE_DIR "${plink_ng_SOURCE_DIR}/2.0/include")
 endif()
-
-foreach(required_file
-    pgenlib_read.cc
-    pgenlib_ffi_support.cc
-    plink2_base.cc
-    plink2_bits.cc
-    plink2_simd.cc
-    pgenlib_misc.cc)
-  if(NOT EXISTS "${PGENLIB_SOURCE_DIR}/${required_file}")
-    message(FATAL_ERROR
-      "PGENLIB_SOURCE_DIR does not look like plink-ng/2.0/include: "
-      "missing ${required_file}")
-  endif()
-endforeach()
-
-add_library(pgenlib STATIC
-  "${PGENLIB_SOURCE_DIR}/plink2_base.cc"
-  "${PGENLIB_SOURCE_DIR}/plink2_bits.cc"
-  "${PGENLIB_SOURCE_DIR}/plink2_simd.cc"
-  "${PGENLIB_SOURCE_DIR}/pgenlib_misc.cc"
-  "${PGENLIB_SOURCE_DIR}/pgenlib_read.cc"
-  "${PGENLIB_SOURCE_DIR}/pgenlib_ffi_support.cc"
-)
-target_include_directories(pgenlib PUBLIC "${PGENLIB_SOURCE_DIR}")
-target_compile_options(pgenlib PRIVATE
-  $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wno-unused-function>
-)
 
 find_package(ZLIB REQUIRED)
 find_path(ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
@@ -70,7 +66,9 @@ add_library(pgensparsescore_lib
   src/scorer.cc
 )
 target_include_directories(pgensparsescore_lib PUBLIC src)
-target_link_libraries(pgensparsescore_lib PUBLIC pgenlib ZLIB::ZLIB ZSTD::ZSTD)
+target_link_libraries(
+  pgensparsescore_lib PUBLIC pgen_rans::pgenlib ZLIB::ZLIB ZSTD::ZSTD
+)
 target_compile_options(pgensparsescore_lib PRIVATE
   $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>
 )

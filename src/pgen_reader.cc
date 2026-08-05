@@ -21,41 +21,16 @@ void ThrowPgenError(const std::string& operation, plink2::PglErr error) {
 
 PgenDosageReader::PgenDosageReader(const std::string& path) {
   using namespace plink2;
-  PreinitPgfi(&pgfi_);
-  PreinitPgr(&pgr_);
-  PgenHeaderCtrl header_ctrl;
-  uintptr_t alloc_cacheline_ct = 0;
-  char error_buffer[kPglErrstrBufBlen]{};
-  PglErr error = PgfiInitPhase1(path.c_str(), nullptr, UINT32_MAX, UINT32_MAX,
-                                &header_ctrl, &pgfi_, &alloc_cacheline_ct,
-                                error_buffer);
-  if (error != kPglRetSuccess) {
-    throw std::runtime_error("cannot open PGEN " + path + ": " + error_buffer);
+  std::string error;
+  if (!reader_.Open(path, &error)) {
+    throw std::runtime_error("cannot open PGEN " + path + ": " + error);
   }
-  sample_ct_ = pgfi_.raw_sample_ct;
-  variant_ct_ = pgfi_.raw_variant_ct;
+  sample_ct_ = reader_.sample_ct();
+  variant_ct_ = reader_.variant_ct();
   if (!sample_ct_ || !variant_ct_) {
     throw std::runtime_error("PGEN must contain at least one sample and variant");
   }
-  if (cachealigned_malloc(alloc_cacheline_ct * kCacheline, &pgfi_alloc_)) {
-    throw std::bad_alloc();
-  }
-  uint32_t max_vrec_width = 0;
-  error = PgfiInitPhase2(header_ctrl, 0, 0, 0, 0, variant_ct_,
-                         &max_vrec_width, &pgfi_, pgfi_alloc_,
-                         &alloc_cacheline_ct, error_buffer);
-  if (error != kPglRetSuccess) {
-    throw std::runtime_error("cannot initialize PGEN index " + path + ": " +
-                             error_buffer);
-  }
-  if (cachealigned_malloc(alloc_cacheline_ct * kCacheline, &pgr_alloc_)) {
-    throw std::bad_alloc();
-  }
-  error = PgrInit(path.c_str(), max_vrec_width, &pgfi_, &pgr_, pgr_alloc_);
-  if (error != kPglRetSuccess) {
-    ThrowPgenError("PgrInit", error);
-  }
-  PgrClearSampleSubsetIndex(&pgr_, &pssi_);
+  PgrClearSampleSubsetIndex(reader_.pgen_reader(), &pssi_);
 
   if (cachealigned_malloc(NypCtToVecCt(sample_ct_) * kBytesPerVec, &genovec_) ||
       cachealigned_malloc(BitCtToVecCt(sample_ct_) * kBytesPerVec,
@@ -79,15 +54,16 @@ PgenDosageReader::PgenDosageReader(const std::string& path) {
 
 PgenDosageReader::~PgenDosageReader() {
   using namespace plink2;
-  PglErr cleanup_error = kPglRetSuccess;
-  CleanupPgr(&pgr_, &cleanup_error);
-  CleanupPgfi(&pgfi_, &cleanup_error);
-  if (pgfi_alloc_) aligned_free(pgfi_alloc_);
-  if (pgr_alloc_) aligned_free(pgr_alloc_);
   if (genovec_) aligned_free(genovec_);
   if (dosage_present_) aligned_free(dosage_present_);
   if (dosage_main_) aligned_free(dosage_main_);
   if (difflist_sample_ids_) aligned_free(difflist_sample_ids_);
+}
+
+const char* PgenDosageReader::storage_mode_name() const {
+  return reader_.storage_mode() == pgen_rans::PgenStorageMode::kConditionalRans
+             ? "conditional-rans"
+             : "standard";
 }
 
 DosageView PgenDosageReader::Read(uint32_t variant_idx,
@@ -101,11 +77,12 @@ DosageView PgenDosageReader::Read(uint32_t variant_idx,
   PglErr error;
   if (max_sparse_dosage_ct_) {
     error = PgrGetDMaybeSparse(nullptr, pssi_, sample_ct_, variant_idx,
-                               max_sparse_dosage_ct_, &pgr_, genovec_,
+                               max_sparse_dosage_ct_, reader_.pgen_reader(), genovec_,
                                dosage_present_, dosage_main_, &dosage_ct,
                                &common_dosage16, difflist_sample_ids_);
   } else {
-    error = PgrGetD(nullptr, pssi_, sample_ct_, variant_idx, &pgr_, genovec_,
+    error = PgrGetD(nullptr, pssi_, sample_ct_, variant_idx,
+                    reader_.pgen_reader(), genovec_,
                     dosage_present_, dosage_main_, &dosage_ct);
   }
   if (error != kPglRetSuccess) {

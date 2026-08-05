@@ -269,6 +269,50 @@ def main() -> None:
         )
         if compiled_metadata["catalog_source"] != "compiled":
             raise AssertionError("compiled catalog source is absent from metadata")
+        if compiled_metadata["pvar_variants_loaded"] != 2:
+            raise AssertionError("compiled catalog did not filter PVAR metadata")
+        if compiled_metadata["pgen_storage_modes"] != ["standard", "standard"]:
+            raise AssertionError("ordinary PGEN storage modes are absent from metadata")
+
+        direct_catalog = tmp / "direct.catalog.bin"
+        (tmp / "direct-score.tsv").write_text(
+            WEIGHT_HEADER + "v2\tC\tT\t3\n"
+        )
+        (tmp / "direct-manifest.tsv").write_text(
+            "SCORE\tPATH\ndirect\tdirect-score.tsv\n"
+        )
+        run(
+            args.scorer,
+            "compile",
+            "--manifest",
+            str(tmp / "direct-manifest.tsv"),
+            "--out",
+            str(direct_catalog),
+        )
+        direct_output = tmp / "direct-result"
+        run(
+            args.scorer,
+            "--pgen",
+            str(pfile.with_suffix(".pgen")),
+            "--pvar",
+            str(pfile.with_suffix(".pvar")),
+            "--psam",
+            str(pfile.with_suffix(".psam")),
+            "--compiled-catalog",
+            str(direct_catalog),
+            "--read-freq",
+            str(frequency_path),
+            "--error-on-missing-freq",
+            "--out",
+            str(direct_output),
+        )
+        direct_metadata = json.loads(
+            direct_output.with_suffix(".json").read_text()
+        )
+        if direct_metadata["pvar_variants_loaded"] != 1:
+            raise AssertionError(
+                "compiled catalog without a variant map did not filter PVAR metadata"
+            )
 
         (tmp / "late-score.tsv").write_text(
             WEIGHT_HEADER + "source-v2\tC\tT\t3\n"

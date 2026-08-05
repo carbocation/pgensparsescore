@@ -4,28 +4,31 @@
 variants of a PGEN file.  Its weight index is variant-major: a decoded dosage
 vector is applied only to the scores which contain that variant.
 
-This is an early correctness-first implementation.  It supports biallelic
-variants, PGEN hardcalls and dosages, fixed-frequency or cohort-frequency mean
-imputation, and weights whose effect allele is either REF or ALT.  The allele
-order in a weight row does not need to match the PVAR allele order.  PGEN
-dosages are used on the stored 0--2 scale; chromosome- and sex-specific ploidy
-transformations are not yet performed.
+This is an early correctness-first implementation. It supports biallelic
+variants, ordinary and conditional-rANS PGEN input, PGEN hardcalls and dosages,
+fixed-frequency or cohort-frequency mean imputation, and weights whose effect
+allele is either REF or ALT. The allele order in a weight row does not need to
+match the PVAR allele order. PGEN dosages are used on the stored 0--2 scale;
+chromosome- and sex-specific ploidy transformations are not yet performed.
 
 ## Build
 
-The executable links directly to the LGPL-3.0 `pgenlib` sources. CMake can
-fetch a pinned revision of
+The executable links to the PGEN reader libraries in a pinned revision of
 [carbocation/plink-ng](https://github.com/carbocation/plink-ng), or an existing
 checkout can be supplied for offline builds.
 
 ```sh
-cmake -S . -B build -DPGENLIB_SOURCE_DIR=/path/to/plink-ng/2.0/include
+cmake -S . -B build -DPLINK_NG_SOURCE_DIR=/path/to/plink-ng
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Omit `PGENLIB_SOURCE_DIR` to let CMake fetch the pinned revision.
+Omit `PLINK_NG_SOURCE_DIR` to let CMake fetch the pinned revision.
 Development packages for zlib and zstd are also required.
+
+The same command reads ordinary and conditional-rANS PGENs; storage mode is
+detected from the PGEN header. The JSON run metadata records the mode used for
+each input file.
 
 ## Reusable compiled catalogs
 
@@ -127,9 +130,10 @@ keeps ID translation separate from allele interpretation and avoids creating
 a translated copy of every score file.
 
 When a map is supplied, the scorer scans each PVAR but retains metadata only
-for its `TARGET_ID` values. PGEN reads still use the original PVAR row numbers.
-This permits scoring a small mapped variant set from a much larger PGEN without
-first writing a subset PGEN.
+for its `TARGET_ID` values. A compiled catalog also limits retained PVAR rows
+to variants present in that catalog, even when no ID map is needed. PGEN reads
+still use the original PVAR row numbers. This permits scoring a small catalog
+from a much larger PGEN without first writing a subset PGEN.
 
 ## Run
 
@@ -223,7 +227,7 @@ Additional outputs are:
 - `catalog.json`: output dimensions and run-level counters.
 
 The JSON also records `variant_mapping_rows` (zero when `--variant-map` is not
-used).
+used), `pvar_variants_loaded`, and the storage mode of each input PGEN.
 
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix
@@ -257,4 +261,4 @@ applied.  The score matrix is file-backed, so RAM does not grow as
 
 ## License
 
-The application is GPL-3.0-only.  `pgenlib` is a separate LGPL-3.0 dependency.
+The application is GPL-3.0-only.

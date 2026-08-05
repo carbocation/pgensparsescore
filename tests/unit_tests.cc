@@ -14,7 +14,10 @@
 #include "compiled_catalog.h"
 #include "frequency.h"
 #include "mapped_matrix.h"
+#include "pgen_rans_container.h"
+#include "pgen_rans_hybrid.h"
 #include "pfile.h"
+#include "pgen_reader.h"
 #include "scorer.h"
 
 namespace {
@@ -63,6 +66,68 @@ void TestSparseKernel() {
     for (uint32_t idx = 0; idx < 5; ++idx) {
       ExpectNear(matrix.Row(0)[idx], expected[idx], "sparse row");
     }
+  }
+  std::filesystem::remove(path);
+}
+
+void TestConditionalRansPgenReader() {
+  constexpr uint32_t sample_ct = 33;
+  constexpr uint32_t variant_ct = 2;
+  const auto path = TempPath("-conditional-rans.pgen");
+  std::vector<uint64_t> sparse(pgen_rans::PackedWordCt(sample_ct), 0);
+  pgen_rans::SetPackedGenotype(sparse.data(), 3, 1);
+  pgen_rans::SetPackedGenotype(sparse.data(), 17, 3);
+  std::vector<uint64_t> dense(pgen_rans::PackedWordCt(sample_ct), 0);
+  for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
+    pgen_rans::SetPackedGenotype(
+        dense.data(), sample_idx,
+        static_cast<uint8_t>((sample_idx + 1) % 3));
+  }
+  pgen_rans::SetPackedGenotype(dense.data(), 16, 3);
+
+  pgen_rans::EncodedBlock block;
+  block.first_variant = 0;
+  block.records.resize(variant_ct);
+  std::string error;
+  if (!pgen_rans::EncodeSparsePredictorRecord(
+          sparse.data(), nullptr, nullptr, sample_ct,
+          pgen_rans::RecordMode::kMarginal, 0, 0, &block.records[0],
+          &error) ||
+      !pgen_rans::EncodeRawRecord(
+          dense.data(), sample_ct, &block.records[1], &error)) {
+    throw std::runtime_error("cannot encode conditional-rANS fixture: " +
+                             error);
+  }
+  pgen_rans::ContainerWriter writer;
+  const pgen_rans::ContainerParams params(
+      sample_ct, variant_ct, variant_ct, 1, 4, 12, 1, 1, 2);
+  if (!writer.Open(path.string(), params, {}, &error) ||
+      !writer.WriteBlock(block, &error) || !writer.Close(&error)) {
+    throw std::runtime_error("cannot write conditional-rANS fixture: " +
+                             error);
+  }
+
+  {
+    pgensparsescore::PgenDosageReader reader(path.string());
+    if (reader.sample_ct() != sample_ct || reader.variant_ct() != variant_ct ||
+        std::string(reader.storage_mode_name()) != "conditional-rans") {
+      throw std::runtime_error("conditional-rANS PGEN metadata is wrong");
+    }
+    const auto sparse_view = reader.Read(0, 0.25);
+    if (!sparse_view.sparse || sparse_view.common != 0.0 ||
+        sparse_view.sparse_value_ct != 2 || sparse_view.missing_ct != 1 ||
+        sparse_view.sparse_sample_ids[0] != 3 ||
+        sparse_view.sparse_sample_ids[1] != 17 ||
+        sparse_view.sparse_dosage16[0] != 16384 ||
+        sparse_view.sparse_dosage16[1] != UINT16_MAX) {
+      throw std::runtime_error("conditional-rANS sparse dosage is wrong");
+    }
+    const auto dense_view = reader.Read(1, 0.75);
+    if (dense_view.sparse || dense_view.missing_ct != 1) {
+      throw std::runtime_error("conditional-rANS dense dosage is wrong");
+    }
+    ExpectNear(dense_view.dense_values[16], 0.75,
+               "conditional-rANS missing-value imputation");
   }
   std::filesystem::remove(path);
 }
@@ -271,6 +336,7 @@ int main() {
   try {
     TestDenseKernel();
     TestSparseKernel();
+    TestConditionalRansPgenReader();
     TestCatalogOrientation();
     TestRepeatedWeightRowsAreRetained();
     TestVariantMapping();

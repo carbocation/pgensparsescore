@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "pgenlib_read.h"
+#include "pgen_rans_pgenlib.h"
 
 namespace pgensparsescore {
 
@@ -31,14 +31,12 @@ class PgenDosageReader {
 
   uint32_t sample_ct() const { return sample_ct_; }
   uint32_t variant_ct() const { return variant_ct_; }
+  const char* storage_mode_name() const;
   DosageView Read(uint32_t variant_idx,
                   std::optional<double> imputation_mean = std::nullopt);
 
  private:
-  plink2::PgenFileInfo pgfi_{};
-  plink2::PgenReader pgr_{};
-  unsigned char* pgfi_alloc_ = nullptr;
-  unsigned char* pgr_alloc_ = nullptr;
+  pgen_rans::UnifiedPgenReader reader_;
   uintptr_t* genovec_ = nullptr;
   uintptr_t* dosage_present_ = nullptr;
   uint16_t* dosage_main_ = nullptr;

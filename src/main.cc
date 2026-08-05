@@ -351,6 +351,8 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
 void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    uint32_t pgen_ct, uint64_t frequency_row_ct,
                    uint64_t variant_mapping_row_ct,
+                   uint64_t pvar_variant_ct,
+                   const std::vector<std::string>& pgen_storage_modes,
                    const std::string& catalog_source,
                    pgensparsescore::MissingFrequencyPolicy frequency_policy,
                    uint64_t working_matrix_byte_ct,
@@ -392,6 +394,13 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"frequency_rows\": " << frequency_row_ct << ",\n"
            << "  \"variant_mapping_rows\": " << variant_mapping_row_ct
            << ",\n"
+           << "  \"pvar_variants_loaded\": " << pvar_variant_ct << ",\n"
+           << "  \"pgen_storage_modes\": [";
+    for (size_t idx = 0; idx < pgen_storage_modes.size(); ++idx) {
+      if (idx) output << ", ";
+      output << "\"" << pgen_storage_modes[idx] << "\"";
+    }
+    output << "],\n"
            << "  \"catalog_source\": \"" << catalog_source << "\",\n"
            << "  \"missing_frequency_policy\": \""
            << MissingFrequencyPolicyName(frequency_policy) << "\",\n"
@@ -496,23 +505,29 @@ int main(int argc, char** argv) {
           pgensparsescore::ReadCompiledCatalog(options.compiled_catalog);
     }
     std::optional<pgensparsescore::VariantMap> variant_map;
-    std::unordered_set<std::string> mapped_target_ids;
     if (!options.variant_map.empty()) {
       variant_map = pgensparsescore::ReadVariantMap(options.variant_map);
-      if (compiled_catalog) {
-        mapped_target_ids.reserve(compiled_catalog->variants.size());
-        for (const auto& variant : compiled_catalog->variants) {
+    }
+    std::unordered_set<std::string> target_variant_ids;
+    const bool filter_pvar = compiled_catalog.has_value() ||
+                             !options.variant_map.empty();
+    if (compiled_catalog) {
+      target_variant_ids.reserve(compiled_catalog->variants.size());
+      for (const auto& variant : compiled_catalog->variants) {
+        if (variant_map) {
           const auto mapping = variant_map->find(variant.source_id);
           if (mapping != variant_map->end()) {
-            mapped_target_ids.insert(mapping->second);
+            target_variant_ids.insert(mapping->second);
           }
+        } else {
+          target_variant_ids.insert(variant.source_id);
         }
-      } else {
-        mapped_target_ids.reserve(variant_map->size());
-        for (const auto& [source_id, target_id] : *variant_map) {
-          static_cast<void>(source_id);
-          mapped_target_ids.insert(target_id);
-        }
+      }
+    } else if (variant_map) {
+      target_variant_ids.reserve(variant_map->size());
+      for (const auto& [source_id, target_id] : *variant_map) {
+        static_cast<void>(source_id);
+        target_variant_ids.insert(target_id);
       }
     }
 
@@ -533,7 +548,7 @@ int main(int argc, char** argv) {
       }
       auto pvar = pgensparsescore::ReadPvar(
           inputs[input_idx].pvar,
-          variant_map ? &mapped_target_ids : nullptr);
+          filter_pvar ? &target_variant_ids : nullptr);
       pvar_row_counts.push_back(pvar.row_ct);
       if (all_variants.size() + pvar.variants.size() >
           std::numeric_limits<uint32_t>::max()) {
@@ -547,6 +562,7 @@ int main(int argc, char** argv) {
         local_index_by_variant.push_back(local_idx);
       }
     }
+    const uint64_t pvar_variant_ct = all_variants.size();
     auto catalog = compiled_catalog
                        ? pgensparsescore::MaterializeCompiledCatalog(
                              *compiled_catalog, all_variants,
@@ -588,16 +604,19 @@ int main(int argc, char** argv) {
     const std::string working_path = options.out + ".work.score-major.bin";
     RemoveFileOnExit remove_working(working_path);
     uint64_t working_matrix_byte_ct = 0;
+    std::vector<std::string> pgen_storage_modes(inputs.size());
     {
       pgensparsescore::MappedMatrix matrix(
           working_path, catalog.scores.size(), samples.size());
       working_matrix_byte_ct = matrix.byte_ct();
 
-      auto process = [&](const pgensparsescore::PfileSpec& input,
+      auto process = [&](size_t input_idx,
+                         const pgensparsescore::PfileSpec& input,
                          const std::vector<pgensparsescore::Variant>& variants,
                          const pgensparsescore::Catalog& input_catalog,
                          uint32_t pvar_row_ct) {
         pgensparsescore::PgenDosageReader reader(input.pgen);
+        pgen_storage_modes[input_idx] = reader.storage_mode_name();
         if (reader.variant_ct() != pvar_row_ct) {
           throw std::runtime_error("PGEN/PVAR variant-count mismatch: " +
                                    input.pgen);
@@ -613,7 +632,7 @@ int main(int argc, char** argv) {
       };
 
       for (size_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
-        process(inputs[input_idx], variants_by_input[input_idx],
+        process(input_idx, inputs[input_idx], variants_by_input[input_idx],
                 catalog_by_input[input_idx], pvar_row_counts[input_idx]);
       }
       WriteWideScores(options.out, samples, catalog, matrix);
@@ -622,6 +641,7 @@ int main(int argc, char** argv) {
     WriteMetadata(options.out, samples.size(), samples.front().fid.has_value(),
                   inputs.size(), frequencies ? frequencies->size() : 0,
                   variant_map ? variant_map->size() : 0,
+                  pvar_variant_ct, pgen_storage_modes,
                   compiled_catalog ? "compiled" : "manifest",
                   options.missing_frequency_policy, working_matrix_byte_ct,
                   catalog, stats);
