@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pristine-fetchcontent-configure:
+    name: Pristine default FetchContent configure
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install configure dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ninja-build zlib1g-dev libzstd-dev
+
+      - name: Configure from an empty build directory
+        run: cmake -S . -B build-fetchcontent -G Ninja -DBUILD_TESTING=OFF

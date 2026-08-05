@@ -13,9 +13,10 @@ transformations are not yet performed.
 
 ## Build
 
-The executable links directly to the LGPL-3.0 `pgenlib` sources.  CMake can
-fetch a pinned public revision of [plink-ng](https://github.com/chrchang/plink-ng),
-or an existing checkout can be supplied for offline builds.
+The executable links directly to the LGPL-3.0 `pgenlib` sources. CMake can
+fetch a pinned revision of
+[carbocation/plink-ng](https://github.com/carbocation/plink-ng), or an existing
+checkout can be supplied for offline builds.
 
 ```sh
 cmake -S . -B build -DPGENLIB_SOURCE_DIR=/path/to/plink-ng/2.0/include

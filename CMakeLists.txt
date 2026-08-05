@@ -10,12 +10,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(PGENLIB_SOURCE_DIR "" CACHE PATH
-    "Path to plink-ng/2.0/include; fetched from upstream when empty")
+    "Path to plink-ng/2.0/include; the pinned repository is fetched when empty")
 
 if(NOT PGENLIB_SOURCE_DIR)
   FetchContent_Declare(
     plink_ng
-    GIT_REPOSITORY https://github.com/chrchang/plink-ng.git
+    GIT_REPOSITORY https://github.com/carbocation/plink-ng.git
     GIT_TAG 57b9e7d79ca51a7e66471927131af3a49ff5fa18
     GIT_SHALLOW FALSE
   )
