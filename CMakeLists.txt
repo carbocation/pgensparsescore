@@ -61,6 +61,7 @@ set_target_properties(ZSTD::ZSTD PROPERTIES
 
 add_library(pgensparsescore_lib
   src/catalog.cc
+  src/compiled_catalog.cc
   src/frequency.cc
   src/io.cc
   src/mapped_matrix.cc

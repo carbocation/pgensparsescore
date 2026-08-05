@@ -223,6 +223,53 @@ def main() -> None:
         if mapped_metadata["variant_mapping_rows"] != 2:
             raise AssertionError("variant mapping row count is absent from metadata")
 
+        compiled_catalog = tmp / "mapped.catalog.bin"
+        run(
+            args.scorer,
+            "compile",
+            "--manifest",
+            str(tmp / "mapped-manifest.tsv"),
+            "--variant-map",
+            str(tmp / "variant-map.tsv"),
+            "--out",
+            str(compiled_catalog),
+        )
+        compiled_output = tmp / "compiled-result"
+        run(
+            args.scorer,
+            "--pfile-list",
+            str(tmp / "pfiles.tsv"),
+            "--compiled-catalog",
+            str(compiled_catalog),
+            "--variant-map",
+            str(tmp / "variant-map.tsv"),
+            "--read-freq",
+            str(frequency_path),
+            "--missing-freq",
+            "error",
+            "--out",
+            str(compiled_output),
+        )
+        with gzip.open(
+            compiled_output.with_suffix(".scores.tsv.gz"), "rt", newline=""
+        ) as handle:
+            compiled_rows = list(csv.DictReader(handle, delimiter="\t"))
+        assert_close(
+            [float(row["score1"]) for row in compiled_rows],
+            score_results["multi"][0],
+            "compiled-catalog score1",
+        )
+        assert_close(
+            [float(row["score2"]) for row in compiled_rows],
+            score_results["multi"][1],
+            "compiled-catalog score2",
+        )
+        compiled_metadata = json.loads(
+            compiled_output.with_suffix(".json").read_text()
+        )
+        if compiled_metadata["catalog_source"] != "compiled":
+            raise AssertionError("compiled catalog source is absent from metadata")
+
         (tmp / "late-score.tsv").write_text(
             WEIGHT_HEADER + "source-v2\tC\tT\t3\n"
         )
@@ -285,6 +332,50 @@ def main() -> None:
         )
         if (tmp / "missing-result.work.score-major.bin").exists():
             raise AssertionError("failed run left its working score matrix behind")
+
+        omitted_output = tmp / "omitted-result"
+        run(
+            args.scorer,
+            "--pgen",
+            str(pfile.with_suffix(".pgen")),
+            "--pvar",
+            str(pfile.with_suffix(".pvar")),
+            "--psam",
+            str(pfile.with_suffix(".psam")),
+            "--compiled-catalog",
+            str(compiled_catalog),
+            "--variant-map",
+            str(tmp / "variant-map.tsv"),
+            "--read-freq",
+            str(missing_frequency),
+            "--missing-freq",
+            "omit",
+            "--out",
+            str(omitted_output),
+        )
+        with gzip.open(
+            omitted_output.with_suffix(".scores.tsv.gz"), "rt", newline=""
+        ) as handle:
+            omitted_rows = list(csv.DictReader(handle, delimiter="\t"))
+        assert_close(
+            [float(row["score1"]) for row in omitted_rows],
+            [0.0, 2.0, 4.0, 2.0 / 3.0],
+            "missing-frequency omission score1",
+        )
+        assert_close(
+            [float(row["score2"]) for row in omitted_rows],
+            score_results["single"][1],
+            "missing-frequency omission score2",
+        )
+        omitted_metadata = json.loads(omitted_output.with_suffix(".json").read_text())
+        if omitted_metadata["omitted_frequency_variants"] != 1:
+            raise AssertionError("omitted frequency variant count is wrong")
+        with omitted_output.with_suffix(".score-metadata.tsv").open(newline="") as handle:
+            omitted_score_metadata = {
+                row["SCORE"]: row for row in csv.DictReader(handle, delimiter="\t")
+            }
+        if omitted_score_metadata["score1"]["MISSING_FREQUENCIES"] != "1":
+            raise AssertionError("per-score missing frequency count is wrong")
 
         mismatched_frequency = tmp / "mismatched.acount"
         mismatched_frequency.write_text(

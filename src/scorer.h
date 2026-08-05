@@ -19,10 +19,13 @@ void ApplySparseDosage(double common, double mean,
                        const std::vector<Edge>& edges,
                        std::vector<double>* baselines,
                        MappedMatrix* matrix);
+ScoreRunStats ApplyMissingFrequencyPolicy(
+    Catalog* catalog, const std::vector<Variant>& variants,
+    const FrequencyTable* frequencies, MissingFrequencyPolicy policy);
 ScoreRunStats ScoreCatalog(const Catalog& catalog,
                            const std::vector<Variant>& variants,
                            const FrequencyTable* frequencies,
-                           bool error_on_missing_frequency,
+                           MissingFrequencyPolicy missing_frequency_policy,
                            PgenDosageReader* reader, MappedMatrix* matrix);
 
 }  // namespace pgensparsescore

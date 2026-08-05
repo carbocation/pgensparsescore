@@ -27,6 +27,43 @@ ctest --test-dir build --output-on-failure
 Omit `PGENLIB_SOURCE_DIR` to let CMake fetch the pinned revision.
 Development packages for zlib and zstd are also required.
 
+## Reusable compiled catalogs
+
+The manifest form is convenient for small runs, but it requires every score
+file to be parsed each time a cohort is scored. A compiled catalog performs
+that parsing once and stores the nonzero weights grouped by source variant.
+It is independent of a particular PGEN and can be reused for 1KG+HGDP, AoU,
+UKB, and other cohorts.
+
+```sh
+pgensparsescore compile \
+  --manifest scores.tsv \
+  --variant-map selected-variants.tsv.gz \
+  --out selected.catalog.bin
+```
+
+In compile mode, the `SOURCE_ID` keys in `--variant-map` select the variants
+included in the catalog; its `TARGET_ID` values are not stored. Weight-zero
+rows are recorded in QC counts and omitted from the catalog. Without a variant
+map, every nonzero weight in the manifest is included.
+
+Score a cohort by supplying the compiled catalog in place of the manifest:
+
+```sh
+pgensparsescore \
+  --pfile-list cohort.pfiles.tsv \
+  --compiled-catalog selected.catalog.bin \
+  --variant-map cohort.variant-map.tsv.gz \
+  --read-freq reference.acount.zst \
+  --missing-freq omit \
+  --out results/cohort
+```
+
+The binary format stores score metadata, source variant IDs, unordered allele
+pairs, and effect weights. REF/ALT orientation is still determined and checked
+against each target PVAR when the catalog is used. The companion `.json` file
+records its dimensions.
+
 ## Inputs
 
 The score manifest is a tab-separated file with `SCORE` and `PATH` columns.
@@ -151,11 +188,18 @@ allele frequency `p` is converted to expected ALT dosage `2p`.  For every
 scored variant found in the frequency table, the frequency REF and ALT must
 exactly match the PVAR REF and ALT; disagreement is always an error.
 
-With `--error-on-missing-freq`, every scored variant must have a frequency
-row.  Without that flag, variants absent from the frequency table fall back to
-the nonmissing mean in the PGEN currently being scored, and the fallback is
-counted in the JSON metadata.  For cross-dataset comparability, use the strict
-form shown above.
+`--missing-freq` controls a matched PGEN variant which has no frequency row:
+
+- `cohort` uses its nonmissing mean in the PGEN being scored. This is the
+  default and preserves the earlier behavior.
+- `error` stops the run. The older `--error-on-missing-freq` spelling remains
+  accepted.
+- `omit` removes the variant from every score, including any REF-effect
+  intercept. This is useful when scores must be restricted to variants
+  represented by a normalization reference.
+
+With `--read-freq`, only frequency rows relevant to matched score variants are
+retained in memory. The input file is still checked as a stream.
 
 The primary output, `catalog.scores.tsv.gz`, is a gzip-compressed wide table.
 Each row is a sample, followed by one column named for every manifest `SCORE`.
@@ -170,7 +214,8 @@ sample2\t0.5\t0.25
 
 Additional outputs are:
 
-- `catalog.score-metadata.tsv`: score order and matching/QC counts.
+- `catalog.score-metadata.tsv`: score order, weight inclusion, matching,
+  frequency omission, and allele-orientation counts.
 - `catalog.json`: output dimensions and run-level counters.
 
 The JSON also records `variant_mapping_rows` (zero when `--variant-map` is not

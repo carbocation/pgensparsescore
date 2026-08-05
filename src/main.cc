@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "catalog.h"
+#include "compiled_catalog.h"
 #include "frequency.h"
 #include "io.h"
 #include "mapped_matrix.h"
@@ -29,10 +30,19 @@ struct Options {
   std::string psam;
   std::string pfile_list;
   std::string manifest;
+  std::string compiled_catalog;
   std::string variant_map;
   std::string read_freq;
   std::string out;
-  bool error_on_missing_freq = false;
+  pgensparsescore::MissingFrequencyPolicy missing_frequency_policy =
+      pgensparsescore::MissingFrequencyPolicy::kCohort;
+  bool missing_frequency_policy_supplied = false;
+};
+
+struct CompileOptions {
+  std::string manifest;
+  std::string variant_map;
+  std::string out;
 };
 
 class RemoveFileOnExit {
@@ -62,14 +72,77 @@ class RemoveFileOnExit {
 void PrintUsage(std::ostream& stream) {
   stream <<
       "Usage:\n"
+      "  pgensparsescore compile --manifest FILE [--variant-map FILE] \\\n"
+      "                          --out CATALOG.bin\n"
       "  pgensparsescore --pgen FILE --pvar FILE --psam FILE \\\n"
-      "                     --manifest FILE [--variant-map FILE] \\\n"
-      "                     [--read-freq FILE] \\\n"
-      "                     [--error-on-missing-freq] --out PREFIX\n"
-      "  pgensparsescore --pfile-list FILE --manifest FILE \\\n"
+      "                     (--manifest FILE | --compiled-catalog FILE) \\\n"
       "                     [--variant-map FILE] \\\n"
       "                     [--read-freq FILE] \\\n"
-      "                     [--error-on-missing-freq] --out PREFIX\n";
+      "                     [--missing-freq cohort|error|omit] --out PREFIX\n"
+      "  pgensparsescore --pfile-list FILE \\\n"
+      "                     (--manifest FILE | --compiled-catalog FILE) \\\n"
+      "                     [--variant-map FILE] \\\n"
+      "                     [--read-freq FILE] \\\n"
+      "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
+}
+
+pgensparsescore::MissingFrequencyPolicy ParseMissingFrequencyPolicy(
+    const std::string& value) {
+  if (value == "cohort") {
+    return pgensparsescore::MissingFrequencyPolicy::kCohort;
+  }
+  if (value == "error") {
+    return pgensparsescore::MissingFrequencyPolicy::kError;
+  }
+  if (value == "omit") {
+    return pgensparsescore::MissingFrequencyPolicy::kOmit;
+  }
+  throw std::runtime_error(
+      "--missing-freq must be cohort, error, or omit");
+}
+
+std::string MissingFrequencyPolicyName(
+    pgensparsescore::MissingFrequencyPolicy policy) {
+  switch (policy) {
+    case pgensparsescore::MissingFrequencyPolicy::kCohort:
+      return "cohort";
+    case pgensparsescore::MissingFrequencyPolicy::kError:
+      return "error";
+    case pgensparsescore::MissingFrequencyPolicy::kOmit:
+      return "omit";
+  }
+  throw std::runtime_error("invalid missing-frequency policy");
+}
+
+CompileOptions ParseCompileOptions(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[2]) == "--help") {
+    PrintUsage(std::cout);
+    std::exit(0);
+  }
+  CompileOptions options;
+  std::unordered_map<std::string, std::string*> destinations{
+      {"--manifest", &options.manifest},
+      {"--variant-map", &options.variant_map},
+      {"--out", &options.out},
+  };
+  for (int idx = 2; idx < argc; ++idx) {
+    const std::string key(argv[idx]);
+    const auto iter = destinations.find(key);
+    if (iter == destinations.end()) {
+      throw std::runtime_error("unknown compile argument: " + key);
+    }
+    if (++idx >= argc) {
+      throw std::runtime_error("missing value after " + key);
+    }
+    if (!iter->second->empty()) {
+      throw std::runtime_error("argument supplied twice: " + key);
+    }
+    *iter->second = argv[idx];
+  }
+  if (options.manifest.empty() || options.out.empty()) {
+    throw std::runtime_error("compile requires --manifest and --out");
+  }
+  return options;
 }
 
 Options ParseOptions(int argc, char** argv) {
@@ -84,6 +157,7 @@ Options ParseOptions(int argc, char** argv) {
       {"--psam", &options.psam},
       {"--pfile-list", &options.pfile_list},
       {"--manifest", &options.manifest},
+      {"--compiled-catalog", &options.compiled_catalog},
       {"--variant-map", &options.variant_map},
       {"--read-freq", &options.read_freq},
       {"--out", &options.out},
@@ -91,10 +165,24 @@ Options ParseOptions(int argc, char** argv) {
   for (int idx = 1; idx < argc; ++idx) {
     const std::string key(argv[idx]);
     if (key == "--error-on-missing-freq") {
-      if (options.error_on_missing_freq) {
+      if (options.missing_frequency_policy_supplied) {
         throw std::runtime_error("argument supplied twice: " + key);
       }
-      options.error_on_missing_freq = true;
+      options.missing_frequency_policy =
+          pgensparsescore::MissingFrequencyPolicy::kError;
+      options.missing_frequency_policy_supplied = true;
+      continue;
+    }
+    if (key == "--missing-freq") {
+      if (options.missing_frequency_policy_supplied) {
+        throw std::runtime_error("argument supplied twice: " + key);
+      }
+      if (++idx >= argc) {
+        throw std::runtime_error("missing value after " + key);
+      }
+      options.missing_frequency_policy =
+          ParseMissingFrequencyPolicy(argv[idx]);
+      options.missing_frequency_policy_supplied = true;
       continue;
     }
     const auto iter = destinations.find(key);
@@ -109,8 +197,10 @@ Options ParseOptions(int argc, char** argv) {
     }
     *iter->second = argv[idx];
   }
-  if (options.manifest.empty() || options.out.empty()) {
-    throw std::runtime_error("--manifest and --out are required");
+  if (options.out.empty() ||
+      (options.manifest.empty() == options.compiled_catalog.empty())) {
+    throw std::runtime_error(
+        "--out and exactly one of --manifest or --compiled-catalog are required");
   }
   const bool has_single = !options.pgen.empty() || !options.pvar.empty() ||
                           !options.psam.empty();
@@ -123,9 +213,11 @@ Options ParseOptions(int argc, char** argv) {
     throw std::runtime_error(
         "supply either --pfile-list or all of --pgen/--pvar/--psam");
   }
-  if (options.error_on_missing_freq && options.read_freq.empty()) {
+  if (options.missing_frequency_policy !=
+          pgensparsescore::MissingFrequencyPolicy::kCohort &&
+      options.read_freq.empty()) {
     throw std::runtime_error(
-        "--error-on-missing-freq requires --read-freq");
+        "error and omit missing-frequency policies require --read-freq");
   }
   return options;
 }
@@ -252,24 +344,33 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
   output->external_frequency_variant_ct += input.external_frequency_variant_ct;
   output->cohort_frequency_variant_ct += input.cohort_frequency_variant_ct;
   output->missing_frequency_variant_ct += input.missing_frequency_variant_ct;
+  output->omitted_frequency_variant_ct += input.omitted_frequency_variant_ct;
+  output->omitted_frequency_edge_ct += input.omitted_frequency_edge_ct;
 }
 
 void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    uint32_t pgen_ct, uint64_t frequency_row_ct,
                    uint64_t variant_mapping_row_ct,
-                   bool error_on_missing_frequency,
+                   const std::string& catalog_source,
+                   pgensparsescore::MissingFrequencyPolicy frequency_policy,
                    uint64_t working_matrix_byte_ct,
                    const pgensparsescore::Catalog& catalog,
                    const pgensparsescore::ScoreRunStats& stats) {
   {
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
-    output << "INDEX\tSCORE\tINPUT_WEIGHTS\tMATCHED_WEIGHTS\tMISSING_VARIANTS"
+    output << "INDEX\tSCORE\tINPUT_WEIGHTS\tZERO_WEIGHTS"
+              "\tEXCLUDED_WEIGHTS\tCATALOG_WEIGHTS\tMATCHED_WEIGHTS"
+              "\tMISSING_VARIANTS\tMISSING_FREQUENCIES\tSCORED_WEIGHTS"
               "\tALT_EFFECTS\tREF_EFFECTS\tREF_INTERCEPT\n";
     for (uint32_t idx = 0; idx < catalog.scores.size(); ++idx) {
       const auto& score = catalog.scores[idx];
       output << idx << '\t' << score.id << '\t' << score.input_weight_ct << '\t'
-             << score.matched_weight_ct << '\t' << score.missing_variant_ct
+             << score.zero_weight_ct << '\t' << score.excluded_weight_ct << '\t'
+             << score.catalog_weight_ct << '\t' << score.matched_weight_ct
+             << '\t' << score.missing_variant_ct << '\t'
+             << score.missing_frequency_ct << '\t'
+             << (score.matched_weight_ct - score.missing_frequency_ct)
              << '\t' << score.alt_effect_ct << '\t' << score.ref_effect_ct
              << '\t' << score.ref_effect_intercept << '\n';
     }
@@ -290,8 +391,9 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"frequency_rows\": " << frequency_row_ct << ",\n"
            << "  \"variant_mapping_rows\": " << variant_mapping_row_ct
            << ",\n"
-           << "  \"error_on_missing_frequency\": "
-           << (error_on_missing_frequency ? "true" : "false") << ",\n"
+           << "  \"catalog_source\": \"" << catalog_source << "\",\n"
+           << "  \"missing_frequency_policy\": \""
+           << MissingFrequencyPolicyName(frequency_policy) << "\",\n"
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
            << ",\n"
            << "  \"scored_variants\": " << stats.variant_ct << ",\n"
@@ -304,15 +406,74 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"cohort_frequency_variants\": "
            << stats.cohort_frequency_variant_ct << ",\n"
            << "  \"missing_frequency_variants\": "
-           << stats.missing_frequency_variant_ct << "\n"
+           << stats.missing_frequency_variant_ct << ",\n"
+           << "  \"omitted_frequency_variants\": "
+           << stats.omitted_frequency_variant_ct << ",\n"
+           << "  \"omitted_frequency_edges\": "
+           << stats.omitted_frequency_edge_ct << "\n"
            << "}\n";
   }
+}
+
+void WriteCompiledCatalogMetadata(
+    const std::string& path,
+    const pgensparsescore::CompiledCatalog& catalog,
+    uint64_t included_source_variant_ct) {
+  std::ofstream output(path + ".json");
+  if (!output) {
+    throw std::runtime_error("cannot write compiled-catalog metadata");
+  }
+  output << "{\n"
+         << "  \"format\": \"pgensparsescore-compiled-catalog-v1\",\n"
+         << "  \"path\": \""
+         << pgensparsescore::JsonEscape(
+                std::filesystem::path(path).filename().string())
+         << "\",\n"
+         << "  \"scores\": " << catalog.scores.size() << ",\n"
+         << "  \"variants\": " << catalog.variants.size() << ",\n"
+         << "  \"weights\": " << catalog.weight_ct << ",\n"
+         << "  \"included_source_variants\": "
+         << included_source_variant_ct << "\n"
+         << "}\n";
+}
+
+int CompileMain(int argc, char** argv) {
+  const CompileOptions options = ParseCompileOptions(argc, argv);
+  if (std::filesystem::exists(options.out) ||
+      std::filesystem::exists(options.out + ".json")) {
+    throw std::runtime_error("compile output already exists: " + options.out);
+  }
+  std::optional<pgensparsescore::VariantMap> variant_map;
+  std::unordered_set<std::string> included_source_ids;
+  if (!options.variant_map.empty()) {
+    variant_map = pgensparsescore::ReadVariantMap(options.variant_map);
+    included_source_ids.reserve(variant_map->size());
+    for (const auto& [source_id, target_id] : *variant_map) {
+      static_cast<void>(target_id);
+      included_source_ids.insert(source_id);
+    }
+  }
+  const auto catalog = pgensparsescore::CompileSourceCatalog(
+      options.manifest,
+      variant_map ? &included_source_ids : nullptr);
+  pgensparsescore::WriteCompiledCatalog(options.out, catalog);
+  WriteCompiledCatalogMetadata(
+      options.out, catalog,
+      variant_map ? variant_map->size() : catalog.variants.size());
+  std::cerr << "compiled " << catalog.scores.size() << " scores, "
+            << catalog.variants.size() << " variants, and "
+            << catalog.weight_ct << " nonzero weights into " << options.out
+            << '\n';
+  return 0;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
+    if (argc > 1 && std::string(argv[1]) == "compile") {
+      return CompileMain(argc, argv);
+    }
     const Options options = ParseOptions(argc, argv);
     const std::filesystem::path output_path(options.out);
     if (!output_path.parent_path().empty()) {
@@ -323,18 +484,29 @@ int main(int argc, char** argv) {
             ? std::vector<pgensparsescore::PfileSpec>{
                   {options.pgen, options.pvar, options.psam}}
             : pgensparsescore::ReadPfileList(options.pfile_list);
-    std::optional<pgensparsescore::FrequencyTable> frequencies;
-    if (!options.read_freq.empty()) {
-      frequencies = pgensparsescore::ReadFrequencyTable(options.read_freq);
+    std::optional<pgensparsescore::CompiledCatalog> compiled_catalog;
+    if (!options.compiled_catalog.empty()) {
+      compiled_catalog =
+          pgensparsescore::ReadCompiledCatalog(options.compiled_catalog);
     }
     std::optional<pgensparsescore::VariantMap> variant_map;
     std::unordered_set<std::string> mapped_target_ids;
     if (!options.variant_map.empty()) {
       variant_map = pgensparsescore::ReadVariantMap(options.variant_map);
-      mapped_target_ids.reserve(variant_map->size());
-      for (const auto& [source_id, target_id] : *variant_map) {
-        static_cast<void>(source_id);
-        mapped_target_ids.insert(target_id);
+      if (compiled_catalog) {
+        mapped_target_ids.reserve(compiled_catalog->variants.size());
+        for (const auto& variant : compiled_catalog->variants) {
+          const auto mapping = variant_map->find(variant.source_id);
+          if (mapping != variant_map->end()) {
+            mapped_target_ids.insert(mapping->second);
+          }
+        }
+      } else {
+        mapped_target_ids.reserve(variant_map->size());
+        for (const auto& [source_id, target_id] : *variant_map) {
+          static_cast<void>(source_id);
+          mapped_target_ids.insert(target_id);
+        }
       }
     }
 
@@ -369,9 +541,28 @@ int main(int argc, char** argv) {
         local_index_by_variant.push_back(local_idx);
       }
     }
-    auto catalog = pgensparsescore::CompileCatalog(
-        options.manifest, all_variants,
-        variant_map ? &*variant_map : nullptr);
+    auto catalog = compiled_catalog
+                       ? pgensparsescore::MaterializeCompiledCatalog(
+                             *compiled_catalog, all_variants,
+                             variant_map ? &*variant_map : nullptr)
+                       : pgensparsescore::CompileCatalog(
+                             options.manifest, all_variants,
+                             variant_map ? &*variant_map : nullptr);
+    std::optional<pgensparsescore::FrequencyTable> frequencies;
+    if (!options.read_freq.empty()) {
+      std::unordered_set<std::string> scored_variant_ids;
+      scored_variant_ids.reserve(catalog.variants.size());
+      for (const auto& variant : catalog.variants) {
+        scored_variant_ids.insert(all_variants.at(variant.variant_idx).id);
+      }
+      frequencies = pgensparsescore::ReadFrequencyTable(
+          options.read_freq, &scored_variant_ids);
+    }
+    pgensparsescore::ScoreRunStats stats =
+        pgensparsescore::ApplyMissingFrequencyPolicy(
+            &catalog, all_variants,
+            frequencies ? &*frequencies : nullptr,
+            options.missing_frequency_policy);
     auto catalog_by_input =
         PartitionCatalog(&catalog, input_by_variant, local_index_by_variant,
                          inputs.size());
@@ -388,8 +579,6 @@ int main(int argc, char** argv) {
     input_by_variant.shrink_to_fit();
     local_index_by_variant.clear();
     local_index_by_variant.shrink_to_fit();
-    pgensparsescore::ScoreRunStats stats;
-
     const std::string working_path = options.out + ".work.score-major.bin";
     RemoveFileOnExit remove_working(working_path);
     uint64_t working_matrix_byte_ct = 0;
@@ -413,7 +602,7 @@ int main(int argc, char** argv) {
         }
         const auto input_stats = pgensparsescore::ScoreCatalog(
             input_catalog, variants, frequencies ? &*frequencies : nullptr,
-            options.error_on_missing_freq, &reader, &matrix);
+            options.missing_frequency_policy, &reader, &matrix);
         AddStats(input_stats, &stats);
       };
 
@@ -427,7 +616,8 @@ int main(int argc, char** argv) {
     WriteMetadata(options.out, samples.size(), samples.front().fid.has_value(),
                   inputs.size(), frequencies ? frequencies->size() : 0,
                   variant_map ? variant_map->size() : 0,
-                  options.error_on_missing_freq, working_matrix_byte_ct,
+                  compiled_catalog ? "compiled" : "manifest",
+                  options.missing_frequency_policy, working_matrix_byte_ct,
                   catalog, stats);
     std::cerr << "wrote " << catalog.scores.size()
               << " named score columns for " << samples.size()

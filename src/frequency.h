@@ -3,6 +3,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace pgensparsescore {
 
@@ -14,6 +15,10 @@ struct AlleleFrequency {
 
 using FrequencyTable = std::unordered_map<std::string, AlleleFrequency>;
 
-FrequencyTable ReadFrequencyTable(const std::string& path);
+enum class MissingFrequencyPolicy { kCohort, kError, kOmit };
+
+FrequencyTable ReadFrequencyTable(
+    const std::string& path,
+    const std::unordered_set<std::string>* included_ids = nullptr);
 
 }  // namespace pgensparsescore

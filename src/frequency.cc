@@ -94,7 +94,9 @@ double ParseBiallelicValue(const std::string& raw, const std::string& alt,
 
 }  // namespace
 
-FrequencyTable ReadFrequencyTable(const std::string& path) {
+FrequencyTable ReadFrequencyTable(
+    const std::string& path,
+    const std::unordered_set<std::string>* included_ids) {
   LineReader reader(path);
   std::string line;
   if (!reader.GetLine(&line)) {
@@ -147,6 +149,9 @@ FrequencyTable ReadFrequencyTable(const std::string& path) {
                                std::to_string(line_number) +
                                " has too few fields");
     }
+    if (included_ids && !included_ids->count(fields[id_idx])) {
+      continue;
+    }
     const std::string ref = Upper(fields[ref_idx]);
     const std::string alt = Upper(fields[alt_idx]);
     if (ref.empty() || alt.empty() || alt.find(',') != std::string::npos) {
@@ -190,7 +195,7 @@ FrequencyTable ReadFrequencyTable(const std::string& path) {
                                fields[id_idx]);
     }
   }
-  if (result.empty()) {
+  if (result.empty() && !included_ids) {
     throw std::runtime_error(path + " has no frequency rows");
   }
   return result;

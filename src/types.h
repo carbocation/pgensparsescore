@@ -24,6 +24,7 @@ struct Sample {
 struct Edge {
   uint32_t score_idx;
   double beta_alt;
+  bool ref_effect = false;
 };
 
 struct VariantEdges {
@@ -35,8 +36,12 @@ struct ScoreInfo {
   std::string id;
   std::string path;
   uint64_t input_weight_ct = 0;
+  uint64_t zero_weight_ct = 0;
+  uint64_t excluded_weight_ct = 0;
+  uint64_t catalog_weight_ct = 0;
   uint64_t matched_weight_ct = 0;
   uint64_t missing_variant_ct = 0;
+  uint64_t missing_frequency_ct = 0;
   uint64_t ref_effect_ct = 0;
   uint64_t alt_effect_ct = 0;
   double ref_effect_intercept = 0.0;
@@ -57,6 +62,8 @@ struct ScoreRunStats {
   uint64_t external_frequency_variant_ct = 0;
   uint64_t cohort_frequency_variant_ct = 0;
   uint64_t missing_frequency_variant_ct = 0;
+  uint64_t omitted_frequency_variant_ct = 0;
+  uint64_t omitted_frequency_edge_ct = 0;
 };
 
 }  // namespace pgensparsescore

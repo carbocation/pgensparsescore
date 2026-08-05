@@ -36,10 +36,63 @@ void ApplySparseDosage(double common, double mean,
   }
 }
 
+ScoreRunStats ApplyMissingFrequencyPolicy(
+    Catalog* catalog, const std::vector<Variant>& variants,
+    const FrequencyTable* frequencies, MissingFrequencyPolicy policy) {
+  ScoreRunStats stats;
+  if (!frequencies) {
+    if (policy != MissingFrequencyPolicy::kCohort) {
+      throw std::runtime_error(
+          "error and omit missing-frequency policies require a frequency file");
+    }
+    return stats;
+  }
+  std::vector<VariantEdges> retained;
+  retained.reserve(catalog->variants.size());
+  for (auto& variant : catalog->variants) {
+    const Variant& metadata = variants.at(variant.variant_idx);
+    const auto frequency = frequencies->find(metadata.id);
+    if (frequency != frequencies->end()) {
+      if (frequency->second.ref != metadata.ref ||
+          frequency->second.alt != metadata.alt) {
+        throw std::runtime_error(
+            "frequency alleles disagree with PVAR for " + metadata.id +
+            " (PVAR " + metadata.ref + "/" + metadata.alt +
+            ", frequency " + frequency->second.ref + "/" +
+            frequency->second.alt + ")");
+      }
+      retained.push_back(std::move(variant));
+      continue;
+    }
+    if (policy == MissingFrequencyPolicy::kError) {
+      throw std::runtime_error("frequency file has no row for scored variant " +
+                               metadata.id);
+    }
+    if (policy == MissingFrequencyPolicy::kCohort) {
+      retained.push_back(std::move(variant));
+      continue;
+    }
+
+    ++stats.omitted_frequency_variant_ct;
+    stats.omitted_frequency_edge_ct += variant.edges.size();
+    for (const Edge& edge : variant.edges) {
+      ScoreInfo& score = catalog->scores.at(edge.score_idx);
+      ++score.missing_frequency_ct;
+      if (edge.ref_effect) {
+        const double removed_intercept = -2.0 * edge.beta_alt;
+        catalog->intercepts.at(edge.score_idx) -= removed_intercept;
+        score.ref_effect_intercept -= removed_intercept;
+      }
+    }
+  }
+  catalog->variants = std::move(retained);
+  return stats;
+}
+
 ScoreRunStats ScoreCatalog(const Catalog& catalog,
                            const std::vector<Variant>& variants,
                            const FrequencyTable* frequencies,
-                           bool error_on_missing_frequency,
+                           MissingFrequencyPolicy missing_frequency_policy,
                            PgenDosageReader* reader, MappedMatrix* matrix) {
   if (matrix->row_ct() != catalog.scores.size() ||
       matrix->column_ct() != reader->sample_ct()) {
@@ -56,9 +109,13 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
       const auto frequency = frequencies->find(variant_metadata.id);
       if (frequency == frequencies->end()) {
         ++stats.missing_frequency_variant_ct;
-        if (error_on_missing_frequency) {
+        if (missing_frequency_policy == MissingFrequencyPolicy::kError) {
           throw std::runtime_error("frequency file has no row for scored variant " +
                                    variant_metadata.id);
+        }
+        if (missing_frequency_policy == MissingFrequencyPolicy::kOmit) {
+          throw std::runtime_error(
+              "internal error: an omitted frequency reached the scoring loop");
         }
         ++stats.cohort_frequency_variant_ct;
       } else {

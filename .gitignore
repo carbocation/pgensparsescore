@@ -1,4 +1,5 @@
 /build/
+/build-*/
 *.work.score-major.bin
 *.scores.tsv.gz
 *.scores.tsv.gz.tmp
