@@ -559,7 +559,8 @@ void TestMultiFragmentSingleDecodeScoring() {
     std::ofstream output(weights_a);
     output << "SNP\tEFFECT_ALLELE\tOTHER_ALLELE\tEFFECT_ALLELE_WEIGHT\n"
            << "source-v1\tG\tA\t2\n"
-           << "source-v2\tC\tT\t3\n";
+           << "source-v2\tC\tT\t3\n"
+           << "source-v2\tC\tT\t0.5\n";
   }
   {
     std::ofstream output(weights_b);
@@ -632,10 +633,10 @@ void TestMultiFragmentSingleDecodeScoring() {
   const auto split = score({fragment_a_path.string(), fragment_b_path.string()},
                            directory / "split.matrix.bin", "", 4);
   if (combined.second.variant_ct != variant_ct ||
-      split.second.variant_ct != variant_ct || combined.second.edge_ct != 4 ||
-      split.second.edge_ct != 4 ||
-      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 4 ||
-      split.second.sparse_edge_ct + split.second.dense_edge_ct != 4 ||
+      split.second.variant_ct != variant_ct || combined.second.edge_ct != 5 ||
+      split.second.edge_ct != 5 ||
+      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 5 ||
+      split.second.sparse_edge_ct + split.second.dense_edge_ct != 5 ||
       combined.second.sparse_update_ct + combined.second.dense_update_ct == 0 ||
       split.second.sparse_update_ct + split.second.dense_update_ct == 0 ||
       split.second.parallel_variant_ct != 1 ||
@@ -651,7 +652,7 @@ void TestMultiFragmentSingleDecodeScoring() {
                                ? 0.75
                                : static_cast<double>((sample_idx + 1) % 3);
     ExpectNear(combined.first[sample_idx],
-               2.0 * dosage0 + 3.0 * (2.0 - dosage1),
+               2.0 * dosage0 + 3.5 * (2.0 - dosage1),
                "multi-fragment score A");
     ExpectNear(combined.first[sample_ct + sample_idx],
                4.0 * (2.0 - dosage0) - dosage1,

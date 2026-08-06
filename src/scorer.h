@@ -17,6 +17,10 @@ void ApplyDenseDosage(const double* dosages, uint32_t sample_ct,
 void ApplyDenseDosageRange(const double* dosages, uint32_t sample_ct,
                            const std::vector<Edge>& edges, size_t edge_begin,
                            size_t edge_end, MappedMatrix* matrix);
+void ApplyDenseDosagePartition(const double* dosages, uint32_t sample_ct,
+                               const std::vector<Edge>& edges,
+                               uint32_t partition_idx,
+                               uint32_t partition_ct, MappedMatrix* matrix);
 void ApplySparseDosage(double common, double mean,
                        const uint32_t* sample_ids,
                        const uint16_t* dosage16, uint32_t value_ct,
@@ -29,6 +33,14 @@ void ApplySparseDosageRange(double common, double mean,
                             const std::vector<Edge>& edges, size_t edge_begin,
                             size_t edge_end, std::vector<double>* baselines,
                             MappedMatrix* matrix);
+void ApplySparseDosagePartition(double common, double mean,
+                                const uint32_t* sample_ids,
+                                const uint16_t* dosage16, uint32_t value_ct,
+                                const std::vector<Edge>& edges,
+                                uint32_t partition_idx,
+                                uint32_t partition_ct,
+                                std::vector<double>* baselines,
+                                MappedMatrix* matrix);
 ScoreRunStats ApplyMissingFrequencyPolicy(
     Catalog* catalog, const std::vector<Variant>& variants,
     const FrequencyTable* frequencies, MissingFrequencyPolicy policy);

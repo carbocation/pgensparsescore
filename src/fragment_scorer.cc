@@ -139,20 +139,21 @@ class ScoringWorkers {
       ++generation_;
     }
     start_.notify_all();
-    ApplyRange(0, active_thread_ct);
+    ApplyPartition(0, active_thread_ct);
     std::unique_lock<std::mutex> lock(mutex_);
     done_.wait(lock, [&] { return pending_worker_ct_ == 0; });
   }
 
-  void ApplyRange(uint32_t worker_idx, uint32_t active_thread_ct) {
-    const size_t edge_begin = edges_->size() * worker_idx / active_thread_ct;
-    const size_t edge_end = edges_->size() * (worker_idx + 1) / active_thread_ct;
+  void ApplyPartition(uint32_t worker_idx, uint32_t active_thread_ct) {
+    // A fragment may retain repeated rows for the same score and variant.
+    // Score-based ownership keeps all such writes on one worker.
     if (type_ == TaskType::kDense) {
-      ApplyDenseDosageRange(dense_values_, sample_ct_, *edges_, edge_begin,
-                            edge_end, matrix_);
+      ApplyDenseDosagePartition(dense_values_, sample_ct_, *edges_, worker_idx,
+                                active_thread_ct, matrix_);
     } else {
-      ApplySparseDosageRange(common_, mean_, sample_ids_, dosage16_, value_ct_,
-                             *edges_, edge_begin, edge_end, baselines_, matrix_);
+      ApplySparseDosagePartition(common_, mean_, sample_ids_, dosage16_,
+                                 value_ct_, *edges_, worker_idx,
+                                 active_thread_ct, baselines_, matrix_);
     }
   }
 
@@ -170,7 +171,7 @@ class ScoringWorkers {
         active_thread_ct = active_thread_ct_;
       }
       if (worker_idx >= active_thread_ct) continue;
-      ApplyRange(worker_idx, active_thread_ct);
+      ApplyPartition(worker_idx, active_thread_ct);
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!--pending_worker_ct_) done_.notify_one();
