@@ -584,6 +584,11 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
   output->edge_ct += input.edge_ct;
   output->sparse_variant_ct += input.sparse_variant_ct;
   output->dense_variant_ct += input.dense_variant_ct;
+  output->sparse_edge_ct += input.sparse_edge_ct;
+  output->dense_edge_ct += input.dense_edge_ct;
+  output->sparse_value_ct += input.sparse_value_ct;
+  output->sparse_update_ct += input.sparse_update_ct;
+  output->dense_update_ct += input.dense_update_ct;
   output->imputed_value_ct += input.imputed_value_ct;
   output->external_frequency_variant_ct += input.external_frequency_variant_ct;
   output->cohort_frequency_variant_ct += input.cohort_frequency_variant_ct;
@@ -659,6 +664,11 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"weight_edges\": " << stats.edge_ct << ",\n"
            << "  \"sparse_variants\": " << stats.sparse_variant_ct << ",\n"
            << "  \"dense_variants\": " << stats.dense_variant_ct << ",\n"
+           << "  \"sparse_weight_edges\": " << stats.sparse_edge_ct << ",\n"
+           << "  \"dense_weight_edges\": " << stats.dense_edge_ct << ",\n"
+           << "  \"sparse_dosage_values\": " << stats.sparse_value_ct << ",\n"
+           << "  \"sparse_score_updates\": " << stats.sparse_update_ct << ",\n"
+           << "  \"dense_score_updates\": " << stats.dense_update_ct << ",\n"
            << "  \"imputed_values\": " << stats.imputed_value_ct << ",\n"
            << "  \"external_frequency_variants\": "
            << stats.external_frequency_variant_ct << ",\n"
@@ -817,6 +827,10 @@ int RunFragmentScoring(
          {"weight_edges", stats.edge_ct},
          {"sparse_variants", stats.sparse_variant_ct},
          {"dense_variants", stats.dense_variant_ct},
+         {"sparse_weight_edges", stats.sparse_edge_ct},
+         {"dense_weight_edges", stats.dense_edge_ct},
+         {"sparse_score_updates", stats.sparse_update_ct},
+         {"dense_score_updates", stats.dense_update_ct},
          {"imputed_values", stats.imputed_value_ct}});
   }
   std::cerr << "wrote " << loaded.catalog.scores.size()
@@ -1173,7 +1187,11 @@ int main(int argc, char** argv) {
                {"scored_variants_total", stats.variant_ct},
                {"weight_edges_total", stats.edge_ct},
                {"sparse_variants_total", stats.sparse_variant_ct},
-               {"dense_variants_total", stats.dense_variant_ct}});
+               {"dense_variants_total", stats.dense_variant_ct},
+               {"sparse_weight_edges_total", stats.sparse_edge_ct},
+               {"dense_weight_edges_total", stats.dense_edge_ct},
+               {"sparse_score_updates_total", stats.sparse_update_ct},
+               {"dense_score_updates_total", stats.dense_update_ct}});
         }
       };
 
@@ -1201,6 +1219,10 @@ int main(int argc, char** argv) {
            {"weight_edges", stats.edge_ct},
            {"sparse_variants", stats.sparse_variant_ct},
            {"dense_variants", stats.dense_variant_ct},
+           {"sparse_weight_edges", stats.sparse_edge_ct},
+           {"dense_weight_edges", stats.dense_edge_ct},
+           {"sparse_score_updates", stats.sparse_update_ct},
+           {"dense_score_updates", stats.dense_update_ct},
            {"imputed_values", stats.imputed_value_ct}});
     }
     std::cerr << "wrote " << catalog.scores.size()

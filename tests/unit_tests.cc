@@ -632,7 +632,12 @@ void TestMultiFragmentSingleDecodeScoring() {
                            directory / "split.matrix.bin");
   if (combined.second.variant_ct != variant_ct ||
       split.second.variant_ct != variant_ct || combined.second.edge_ct != 4 ||
-      split.second.edge_ct != 4 || combined.first != split.first) {
+      split.second.edge_ct != 4 ||
+      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 4 ||
+      split.second.sparse_edge_ct + split.second.dense_edge_ct != 4 ||
+      combined.second.sparse_update_ct + combined.second.dense_update_ct == 0 ||
+      split.second.sparse_update_ct + split.second.dense_update_ct == 0 ||
+      combined.first != split.first) {
     throw std::runtime_error(
         "splitting score fragments changed scores or genotype decode count");
   }

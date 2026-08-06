@@ -474,11 +474,19 @@ ScoreRunStats ScoreFragments(
       stats.imputed_value_ct += dosage.missing_ct;
       if (dosage.sparse) {
         ++stats.sparse_variant_ct;
+        stats.sparse_edge_ct += combined_edges.size();
+        stats.sparse_value_ct += dosage.sparse_value_ct;
+        stats.sparse_update_ct +=
+            static_cast<uint64_t>(combined_edges.size()) *
+            dosage.sparse_value_ct;
         ApplySparseDosage(dosage.common, dosage.mean, dosage.sparse_sample_ids,
                           dosage.sparse_dosage16, dosage.sparse_value_ct,
                           combined_edges, &baselines, matrix);
       } else {
         ++stats.dense_variant_ct;
+        stats.dense_edge_ct += combined_edges.size();
+        stats.dense_update_ct +=
+            static_cast<uint64_t>(combined_edges.size()) * reader->sample_ct();
         ApplyDenseDosage(dosage.dense_values, reader->sample_ct(),
                          combined_edges, matrix);
       }
@@ -492,6 +500,10 @@ ScoreRunStats ScoreFragments(
              {"weight_edges_processed", stats.edge_ct},
              {"sparse_variants", stats.sparse_variant_ct},
              {"dense_variants", stats.dense_variant_ct},
+             {"sparse_weight_edges", stats.sparse_edge_ct},
+             {"dense_weight_edges", stats.dense_edge_ct},
+             {"sparse_score_updates", stats.sparse_update_ct},
+             {"dense_score_updates", stats.dense_update_ct},
              {"imputed_values", stats.imputed_value_ct}});
       }
       if (!(stats.variant_ct % 100000)) {
@@ -510,6 +522,10 @@ ScoreRunStats ScoreFragments(
            {"weight_edges_processed", stats.edge_ct},
            {"sparse_variants", stats.sparse_variant_ct},
            {"dense_variants", stats.dense_variant_ct},
+           {"sparse_weight_edges", stats.sparse_edge_ct},
+           {"dense_weight_edges", stats.dense_edge_ct},
+           {"sparse_score_updates", stats.sparse_update_ct},
+           {"dense_score_updates", stats.dense_update_ct},
            {"imputed_values", stats.imputed_value_ct}});
     }
   }
@@ -531,6 +547,10 @@ ScoreRunStats ScoreFragments(
          {"weight_edges_processed", stats.edge_ct},
          {"sparse_variants", stats.sparse_variant_ct},
          {"dense_variants", stats.dense_variant_ct},
+         {"sparse_weight_edges", stats.sparse_edge_ct},
+         {"dense_weight_edges", stats.dense_edge_ct},
+         {"sparse_score_updates", stats.sparse_update_ct},
+         {"dense_score_updates", stats.dense_update_ct},
          {"imputed_values", stats.imputed_value_ct}});
   }
   return stats;

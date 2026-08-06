@@ -59,6 +59,11 @@ struct ScoreRunStats {
   uint64_t edge_ct = 0;
   uint64_t sparse_variant_ct = 0;
   uint64_t dense_variant_ct = 0;
+  uint64_t sparse_edge_ct = 0;
+  uint64_t dense_edge_ct = 0;
+  uint64_t sparse_value_ct = 0;
+  uint64_t sparse_update_ct = 0;
+  uint64_t dense_update_ct = 0;
   uint64_t imputed_value_ct = 0;
   uint64_t external_frequency_variant_ct = 0;
   uint64_t cohort_frequency_variant_ct = 0;

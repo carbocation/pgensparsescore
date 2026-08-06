@@ -140,12 +140,19 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
     stats.imputed_value_ct += dosage.missing_ct;
     if (dosage.sparse) {
       ++stats.sparse_variant_ct;
+      stats.sparse_edge_ct += variant.edges.size();
+      stats.sparse_value_ct += dosage.sparse_value_ct;
+      stats.sparse_update_ct +=
+          static_cast<uint64_t>(variant.edges.size()) * dosage.sparse_value_ct;
       ApplySparseDosage(dosage.common, dosage.mean,
                         dosage.sparse_sample_ids, dosage.sparse_dosage16,
                         dosage.sparse_value_ct, variant.edges, &baselines,
                         matrix);
     } else {
       ++stats.dense_variant_ct;
+      stats.dense_edge_ct += variant.edges.size();
+      stats.dense_update_ct +=
+          static_cast<uint64_t>(variant.edges.size()) * reader->sample_ct();
       ApplyDenseDosage(dosage.dense_values, reader->sample_ct(), variant.edges,
                        matrix);
     }
@@ -158,6 +165,10 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
            {"weight_edges_processed", stats.edge_ct},
            {"sparse_variants", stats.sparse_variant_ct},
            {"dense_variants", stats.dense_variant_ct},
+           {"sparse_weight_edges", stats.sparse_edge_ct},
+           {"dense_weight_edges", stats.dense_edge_ct},
+           {"sparse_score_updates", stats.sparse_update_ct},
+           {"dense_score_updates", stats.dense_update_ct},
            {"imputed_values", stats.imputed_value_ct}});
     }
     if (processed % 100000 == 0) {
@@ -181,6 +192,10 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
          {"weight_edges_processed", stats.edge_ct},
          {"sparse_variants", stats.sparse_variant_ct},
          {"dense_variants", stats.dense_variant_ct},
+         {"sparse_weight_edges", stats.sparse_edge_ct},
+         {"dense_weight_edges", stats.dense_edge_ct},
+         {"sparse_score_updates", stats.sparse_update_ct},
+         {"dense_score_updates", stats.dense_update_ct},
          {"imputed_values", stats.imputed_value_ct}});
   }
   return stats;

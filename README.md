@@ -334,9 +334,9 @@ elapsed time, current and peak process memory when the operating system exposes
 them, and phase-specific counters. Compilation reports score files, input and
 retained weights, unique variants, sorting, and serialized bytes. Scoring
 reports catalog loading and matching, PVAR and frequency loading, sparse and
-dense decodes, weight edges, imputed values, and output rows. Phase-boundary
-events are always written; long phases also write events at the requested
-interval.
+dense decodes, weight edges assigned to each decode path, estimated sparse and
+dense score updates, imputed values, and output rows. Phase-boundary events are
+always written; long phases also write events at the requested interval.
 
 Variant-index construction reports both passes through the list, hash-table
 size, and output bytes. Fragment construction reports files and weights read,

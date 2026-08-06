@@ -278,6 +278,18 @@ def main() -> None:
             raise AssertionError("compiled catalog did not filter PVAR metadata")
         if compiled_metadata["pgen_storage_modes"] != ["standard", "standard"]:
             raise AssertionError("ordinary PGEN storage modes are absent from metadata")
+        if (
+            compiled_metadata["sparse_weight_edges"]
+            + compiled_metadata["dense_weight_edges"]
+            != compiled_metadata["weight_edges"]
+        ):
+            raise AssertionError("sparse/dense weight-edge accounting is wrong")
+        if (
+            compiled_metadata["sparse_score_updates"]
+            + compiled_metadata["dense_score_updates"]
+            == 0
+        ):
+            raise AssertionError("score-update accounting is absent")
         progress_events = [
             json.loads(line) for line in compiled_progress.read_text().splitlines()
         ]
