@@ -26,8 +26,8 @@ struct FragmentScore {
 
 struct ScoreFragmentSummary {
   uint64_t variant_index_variant_ct = 0;
-  uint32_t block_size = 0;
-  uint32_t block_ct = 0;
+  uint32_t tile_size = 0;
+  uint32_t tile_ct = 0;
   uint32_t score_ct = 0;
   uint64_t weight_ct = 0;
   uint64_t input_weight_ct = 0;
@@ -41,26 +41,44 @@ ScoreFragmentSummary CompileScoreFragment(
     const ScoreFragmentCompileOptions& options,
     ProgressReporter* progress = nullptr);
 
-struct IndexedVariantEdges {
-  uint32_t ordinal = 0;
-  std::vector<Edge> edges;
+struct ScoreMajorFragmentEdge {
+  uint32_t local_variant_idx = 0;
+  double beta_alt = 0.0;
+  bool ref_effect = false;
 };
 
-class ScoreFragmentBlockCursor {
+class ScoreFragmentScoreRow {
  public:
-  ~ScoreFragmentBlockCursor();
-  ScoreFragmentBlockCursor(ScoreFragmentBlockCursor&&) noexcept;
-  ScoreFragmentBlockCursor& operator=(ScoreFragmentBlockCursor&&) noexcept;
-
-  bool done() const;
-  uint32_t ordinal() const;
-  void AppendEdges(std::vector<Edge>* edges) const;
-  void Next();
+  uint32_t local_score_idx() const { return local_score_idx_; }
+  uint32_t edge_ct() const { return edge_ct_; }
+  ScoreMajorFragmentEdge edge(uint32_t edge_idx) const;
 
  private:
-  struct Impl;
-  std::unique_ptr<Impl> impl_;
-  ScoreFragmentBlockCursor();
+  uint32_t local_score_idx_ = 0;
+  uint32_t edge_ct_ = 0;
+  uint32_t tile_variant_ct_ = 0;
+  const unsigned char* edge_data_ = nullptr;
+  const std::string* path_ = nullptr;
+  friend class ScoreFragmentReader;
+};
+
+class ScoreFragmentTile {
+ public:
+  uint32_t tile_idx() const { return tile_idx_; }
+  uint32_t first_ordinal() const { return first_ordinal_; }
+  uint32_t variant_ct() const { return variant_ct_; }
+  uint32_t referenced_variant_ct() const { return referenced_variant_ct_; }
+  const std::vector<ScoreFragmentScoreRow>& rows() const { return rows_; }
+  void OrReferencedVariants(std::vector<uint64_t>* words) const;
+
+ private:
+  uint32_t tile_idx_ = 0;
+  uint32_t first_ordinal_ = 0;
+  uint32_t variant_ct_ = 0;
+  uint32_t referenced_variant_ct_ = 0;
+  uint32_t bitmap_word_ct_ = 0;
+  const unsigned char* bitmap_data_ = nullptr;
+  std::vector<ScoreFragmentScoreRow> rows_;
   friend class ScoreFragmentReader;
 };
 
@@ -75,16 +93,14 @@ class ScoreFragmentReader {
   ScoreFragmentReader& operator=(ScoreFragmentReader&&) noexcept;
 
   uint64_t variant_ct() const;
-  uint32_t block_size() const;
-  uint32_t block_ct() const;
+  uint32_t tile_size() const;
+  uint32_t tile_ct() const;
   uint64_t signature_lo() const;
   uint64_t signature_hi() const;
   uint64_t weight_ct() const;
   uint64_t file_bytes() const;
   const std::vector<FragmentScore>& scores() const;
-  ScoreFragmentBlockCursor OpenBlock(uint32_t block_idx) const;
-  void ReadBlock(uint32_t block_idx,
-                 std::vector<IndexedVariantEdges>* variants) const;
+  ScoreFragmentTile OpenTile(uint32_t tile_idx) const;
 
  private:
   struct Impl;

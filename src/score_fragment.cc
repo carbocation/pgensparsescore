@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,11 +25,12 @@
 namespace pgensparsescore {
 namespace {
 
-constexpr char kMagic[8] = {'P', 'G', 'S', 'S', 'F', 'R', 'A', 'G'};
+constexpr char kMagic[8] = {'P', 'G', 'S', 'S', 'S', 'M', 'J', 'R'};
 constexpr uint32_t kVersion = 1;
 constexpr uint32_t kHeaderBytes = 96;
+constexpr uint32_t kPreferredTileSize = 2000;
 constexpr uint32_t kRefEffectMask = 0x80000000U;
-constexpr uint32_t kScoreIndexMask = 0x7fffffffU;
+constexpr uint32_t kIndexMask = 0x7fffffffU;
 constexpr uint32_t kMaximumStringBytes = 1U << 28;
 
 struct BucketWeight {
@@ -192,9 +194,8 @@ std::filesystem::path CreateTemporaryDirectory(
   }
   const std::filesystem::path parent =
       std::filesystem::absolute(options.output_path).parent_path();
-  const auto timestamp = std::chrono::steady_clock::now()
-                             .time_since_epoch()
-                             .count();
+  const auto timestamp =
+      std::chrono::steady_clock::now().time_since_epoch().count();
   for (uint32_t attempt = 0; attempt < 100; ++attempt) {
     const auto path = parent /
                       (".pgss-fragment-" + std::to_string(getpid()) + "-" +
@@ -255,32 +256,32 @@ std::vector<ManifestRow> ReadManifest(const std::string& path) {
     }
     std::filesystem::path resolved(fields[path_idx]);
     if (resolved.is_relative()) resolved = base / resolved;
-    result.push_back({fields[score_id_idx], fields[column_idx], fields[path_idx],
-                      resolved.lexically_normal().string()});
+    result.push_back({fields[score_id_idx], fields[column_idx],
+                      fields[path_idx], resolved.lexically_normal().string()});
   }
   if (result.empty()) throw std::runtime_error(path + " has no scores");
   return result;
 }
 
 void FillHeader(unsigned char* header, const VariantIndex& index,
-                uint32_t score_ct, uint64_t weight_ct,
-                uint64_t score_records_offset,
-                uint64_t block_directory_offset, uint64_t block_data_offset,
+                uint32_t tile_size, uint32_t tile_ct, uint32_t score_ct,
+                uint64_t weight_ct, uint64_t score_records_offset,
+                uint64_t tile_directory_offset, uint64_t tile_data_offset,
                 uint64_t file_bytes) {
   std::memset(header, 0, kHeaderBytes);
   std::memcpy(header, kMagic, sizeof(kMagic));
   PutU32(header + 8, kVersion);
   PutU32(header + 12, kHeaderBytes);
   PutU64(header + 16, index.variant_ct());
-  PutU32(header + 24, index.block_size());
-  PutU32(header + 28, index.block_ct());
+  PutU32(header + 24, tile_size);
+  PutU32(header + 28, tile_ct);
   PutU64(header + 32, index.signature_lo());
   PutU64(header + 40, index.signature_hi());
   PutU32(header + 48, score_ct);
   PutU64(header + 56, weight_ct);
   PutU64(header + 64, score_records_offset);
-  PutU64(header + 72, block_directory_offset);
-  PutU64(header + 80, block_data_offset);
+  PutU64(header + 72, tile_directory_offset);
+  PutU64(header + 80, tile_data_offset);
   PutU64(header + 88, file_bytes);
 }
 
@@ -308,6 +309,19 @@ const unsigned char* ReadString(const unsigned char* cursor,
   return cursor + byte_ct;
 }
 
+uint32_t Popcount(uint64_t value) {
+#if defined(__GNUC__) || defined(__clang__)
+  return static_cast<uint32_t>(__builtin_popcountll(value));
+#else
+  uint32_t result = 0;
+  while (value) {
+    value &= value - 1;
+    ++result;
+  }
+  return result;
+#endif
+}
+
 }  // namespace
 
 ScoreFragmentSummary CompileScoreFragment(
@@ -318,14 +332,23 @@ ScoreFragmentSummary CompileScoreFragment(
   }
   VariantIndex index(options.variant_index_path);
   const auto manifest = ReadManifest(options.manifest_path);
-  if (manifest.size() > kScoreIndexMask) {
+  if (manifest.size() > kIndexMask) {
     throw std::runtime_error("score fragment contains too many scores");
   }
+  const uint32_t tile_size =
+      std::min(kPreferredTileSize, index.block_size());
+  if (!tile_size || index.block_size() % tile_size) {
+    throw std::runtime_error(
+        "variant-index block size must be divisible by the scoring tile size");
+  }
+  const uint32_t tile_ct = static_cast<uint32_t>(
+      (index.variant_ct() + tile_size - 1) / tile_size);
   if (progress) {
     progress->Event("fragment", "start",
                     {{"score_files_total", manifest.size()},
                      {"variant_index_variants", index.variant_ct()},
-                     {"variant_blocks", index.block_ct()}},
+                     {"scoring_tile_size", tile_size},
+                     {"scoring_tiles", tile_ct}},
                     {{"manifest", options.manifest_path},
                      {"variant_index", options.variant_index_path},
                      {"output", options.output_path}});
@@ -339,8 +362,8 @@ ScoreFragmentSummary CompileScoreFragment(
   scores.reserve(manifest.size());
   ScoreFragmentSummary summary;
   summary.variant_index_variant_ct = index.variant_ct();
-  summary.block_size = index.block_size();
-  summary.block_ct = index.block_ct();
+  summary.tile_size = tile_size;
+  summary.tile_ct = tile_ct;
   summary.score_ct = static_cast<uint32_t>(manifest.size());
 
   for (uint32_t manifest_idx = 0; manifest_idx < manifest.size();
@@ -417,10 +440,9 @@ ScoreFragmentSummary CompileScoreFragment(
           throw std::runtime_error("cannot create " + path.string());
         }
       }
-      BucketWeight record{*ordinal,
-                          manifest_idx |
-                              (ref_effect ? kRefEffectMask : 0U),
-                          weight};
+      const BucketWeight record{
+          *ordinal,
+          manifest_idx | (ref_effect ? kRefEffectMask : 0U), weight};
       buckets[block_idx]->write(reinterpret_cast<const char*>(&record),
                                 sizeof(record));
       if (!*buckets[block_idx]) {
@@ -457,11 +479,10 @@ ScoreFragmentSummary CompileScoreFragment(
     }
   }
   for (auto& bucket : buckets) {
-    if (bucket) {
-      bucket->close();
-      if (!*bucket) throw std::runtime_error("cannot finish fragment bucket");
-      bucket.reset();
-    }
+    if (!bucket) continue;
+    bucket->close();
+    if (!*bucket) throw std::runtime_error("cannot finish fragment bucket");
+    bucket.reset();
   }
 
   const std::string temporary_output = options.output_path + ".tmp";
@@ -470,8 +491,7 @@ ScoreFragmentSummary CompileScoreFragment(
                              temporary_output);
   }
   FileCleanup output_cleanup(temporary_output);
-  std::ofstream output(temporary_output,
-                       std::ios::binary | std::ios::trunc);
+  std::ofstream output(temporary_output, std::ios::binary | std::ios::trunc);
   if (!output) throw std::runtime_error("cannot create " + temporary_output);
   std::vector<unsigned char> header(kHeaderBytes, 0);
   WriteBytes(&output, header.data(), header.size(), temporary_output);
@@ -486,15 +506,16 @@ ScoreFragmentSummary CompileScoreFragment(
     WriteU64(&output, score.info.duplicate_weight_ct, temporary_output);
     WriteU64(&output, score.info.catalog_weight_ct, temporary_output);
   }
-  const uint64_t block_directory_offset = Position(&output, temporary_output);
-  std::vector<uint64_t> block_offsets(index.block_ct() + 1, 0);
-  for (uint32_t idx = 0; idx <= index.block_ct(); ++idx) {
+  const uint64_t tile_directory_offset = Position(&output, temporary_output);
+  std::vector<uint64_t> tile_offsets(static_cast<uint64_t>(tile_ct) + 1, 0);
+  for (uint32_t idx = 0; idx <= tile_ct; ++idx) {
     WriteU64(&output, 0, temporary_output);
   }
-  const uint64_t block_data_offset = Position(&output, temporary_output);
+  const uint64_t tile_data_offset = Position(&output, temporary_output);
+  const uint32_t tiles_per_index_block = index.block_size() / tile_size;
   uint64_t weights_written = 0;
+  uint32_t next_tile_idx = 0;
   for (uint32_t block_idx = 0; block_idx < index.block_ct(); ++block_idx) {
-    block_offsets[block_idx] = Position(&output, temporary_output);
     std::vector<BucketWeight> records(bucket_weight_ct[block_idx]);
     if (!records.empty()) {
       const auto path = temp_directory /
@@ -502,65 +523,128 @@ ScoreFragmentSummary CompileScoreFragment(
       std::ifstream input(path, std::ios::binary);
       if (!input) throw std::runtime_error("cannot open " + path.string());
       input.read(reinterpret_cast<char*>(records.data()),
-                 static_cast<std::streamsize>(records.size() * sizeof(records[0])));
+                 static_cast<std::streamsize>(records.size() *
+                                              sizeof(records[0])));
       if (!input || input.peek() != std::ifstream::traits_type::eof()) {
-        throw std::runtime_error("invalid score-fragment bucket " + path.string());
+        throw std::runtime_error("invalid score-fragment bucket " +
+                                 path.string());
       }
-      std::sort(records.begin(), records.end(),
-                [](const BucketWeight& lhs, const BucketWeight& rhs) {
-                  if (lhs.ordinal != rhs.ordinal) return lhs.ordinal < rhs.ordinal;
-                  return lhs.score_and_effect < rhs.score_and_effect;
-                });
+      std::stable_sort(
+          records.begin(), records.end(),
+          [tile_size](const BucketWeight& lhs, const BucketWeight& rhs) {
+            const uint32_t lhs_tile = lhs.ordinal / tile_size;
+            const uint32_t rhs_tile = rhs.ordinal / tile_size;
+            if (lhs_tile != rhs_tile) return lhs_tile < rhs_tile;
+            const uint32_t lhs_score = lhs.score_and_effect & kIndexMask;
+            const uint32_t rhs_score = rhs.score_and_effect & kIndexMask;
+            if (lhs_score != rhs_score) return lhs_score < rhs_score;
+            return lhs.ordinal < rhs.ordinal;
+          });
     }
-    uint32_t variant_group_ct = 0;
-    for (size_t idx = 0; idx < records.size(); ++idx) {
-      if (!idx || records[idx].ordinal != records[idx - 1].ordinal) {
-        ++variant_group_ct;
+    const uint32_t block_first_tile = block_idx * tiles_per_index_block;
+    const uint32_t block_tile_end =
+        std::min(tile_ct, block_first_tile + tiles_per_index_block);
+    if (next_tile_idx != block_first_tile) {
+      throw std::runtime_error("score-fragment tile alignment changed");
+    }
+    size_t record_begin = 0;
+    for (; next_tile_idx < block_tile_end; ++next_tile_idx) {
+      tile_offsets[next_tile_idx] = Position(&output, temporary_output);
+      const uint32_t first_ordinal = next_tile_idx * tile_size;
+      const uint32_t tile_variant_ct = static_cast<uint32_t>(
+          std::min<uint64_t>(tile_size, index.variant_ct() - first_ordinal));
+      size_t record_end = record_begin;
+      while (record_end < records.size() &&
+             records[record_end].ordinal / tile_size == next_tile_idx) {
+        ++record_end;
+      }
+      const uint32_t bitmap_word_ct = (tile_variant_ct + 63) / 64;
+      std::vector<uint64_t> bitmap(bitmap_word_ct, 0);
+      uint32_t score_row_ct = 0;
+      uint32_t previous_score = UINT32_MAX;
+      for (size_t idx = record_begin; idx < record_end; ++idx) {
+        const uint32_t local_variant_idx =
+            records[idx].ordinal - first_ordinal;
+        if (local_variant_idx >= tile_variant_ct) {
+          throw std::runtime_error("invalid score-fragment tile contents");
+        }
+        bitmap[local_variant_idx / 64] |= uint64_t{1}
+                                                 << (local_variant_idx % 64);
+        const uint32_t score_idx = records[idx].score_and_effect & kIndexMask;
+        if (score_idx != previous_score) {
+          ++score_row_ct;
+          previous_score = score_idx;
+        }
+      }
+      uint32_t referenced_variant_ct = 0;
+      for (const uint64_t word : bitmap) {
+        referenced_variant_ct += Popcount(word);
+      }
+      WriteU32(&output, tile_variant_ct, temporary_output);
+      WriteU32(&output, referenced_variant_ct, temporary_output);
+      WriteU32(&output, score_row_ct, temporary_output);
+      WriteU32(&output, bitmap_word_ct, temporary_output);
+      for (const uint64_t word : bitmap) {
+        WriteU64(&output, word, temporary_output);
+      }
+      size_t score_begin = record_begin;
+      while (score_begin < record_end) {
+        const uint32_t score_idx =
+            records[score_begin].score_and_effect & kIndexMask;
+        size_t score_end = score_begin + 1;
+        while (score_end < record_end &&
+               (records[score_end].score_and_effect & kIndexMask) ==
+                   score_idx) {
+          ++score_end;
+        }
+        if (score_end - score_begin > UINT32_MAX) {
+          throw std::runtime_error("score-fragment tile row is too large");
+        }
+        WriteU32(&output, score_idx, temporary_output);
+        WriteU32(&output, static_cast<uint32_t>(score_end - score_begin),
+                 temporary_output);
+        for (size_t idx = score_begin; idx < score_end; ++idx) {
+          const uint32_t local_variant_idx =
+              records[idx].ordinal - first_ordinal;
+          const uint32_t variant_and_effect =
+              local_variant_idx |
+              (records[idx].score_and_effect & kRefEffectMask);
+          WriteU32(&output, variant_and_effect, temporary_output);
+          WriteDouble(&output, records[idx].weight, temporary_output);
+        }
+        weights_written += score_end - score_begin;
+        score_begin = score_end;
+      }
+      record_begin = record_end;
+      if (progress) {
+        progress->MaybeEvent(
+            "fragment", "serialize_tiles",
+            {{"tiles_written", next_tile_idx + 1},
+             {"tiles_total", tile_ct},
+             {"weights_written", weights_written},
+             {"weights_total", summary.weight_ct},
+             {"output_bytes", Position(&output, temporary_output)}});
       }
     }
-    WriteU32(&output, variant_group_ct, temporary_output);
-    size_t begin = 0;
-    while (begin < records.size()) {
-      size_t end = begin + 1;
-      while (end < records.size() &&
-             records[end].ordinal == records[begin].ordinal) {
-        ++end;
-      }
-      const uint32_t ordinal = records[begin].ordinal;
-      const uint32_t expected_block = ordinal / index.block_size();
-      if (expected_block != block_idx || end - begin > UINT32_MAX) {
-        throw std::runtime_error("invalid score-fragment bucket contents");
-      }
-      WriteU32(&output, ordinal, temporary_output);
-      WriteU32(&output, static_cast<uint32_t>(end - begin), temporary_output);
-      for (size_t idx = begin; idx < end; ++idx) {
-        WriteU32(&output, records[idx].score_and_effect, temporary_output);
-        WriteDouble(&output, records[idx].weight, temporary_output);
-      }
-      weights_written += end - begin;
-      begin = end;
-    }
-    if (progress) {
-      progress->MaybeEvent("fragment", "serialize_blocks",
-                           {{"blocks_written", block_idx + 1},
-                            {"blocks_total", index.block_ct()},
-                            {"weights_written", weights_written},
-                            {"weights_total", summary.weight_ct},
-                            {"output_bytes", Position(&output, temporary_output)}});
+    if (record_begin != records.size()) {
+      throw std::runtime_error("score-fragment bucket crossed an index block");
     }
   }
-  block_offsets[index.block_ct()] = Position(&output, temporary_output);
+  if (next_tile_idx != tile_ct) {
+    throw std::runtime_error("score-fragment tile count changed");
+  }
+  tile_offsets[tile_ct] = Position(&output, temporary_output);
   if (weights_written != summary.weight_ct) {
     throw std::runtime_error("fragment weight count changed during serialization");
   }
-  summary.output_bytes = block_offsets.back();
-  output.seekp(static_cast<std::streamoff>(block_directory_offset));
-  for (const uint64_t offset : block_offsets) {
+  summary.output_bytes = tile_offsets.back();
+  output.seekp(static_cast<std::streamoff>(tile_directory_offset));
+  for (const uint64_t offset : tile_offsets) {
     WriteU64(&output, offset, temporary_output);
   }
-  FillHeader(header.data(), index, scores.size(), summary.weight_ct,
-             score_records_offset, block_directory_offset, block_data_offset,
-             summary.output_bytes);
+  FillHeader(header.data(), index, tile_size, tile_ct, scores.size(),
+             summary.weight_ct, score_records_offset, tile_directory_offset,
+             tile_data_offset, summary.output_bytes);
   output.seekp(0);
   WriteBytes(&output, header.data(), header.size(), temporary_output);
   output.close();
@@ -575,6 +659,8 @@ ScoreFragmentSummary CompileScoreFragment(
                      {"zero_weights", summary.zero_weight_ct},
                      {"excluded_weights", summary.excluded_weight_ct},
                      {"duplicate_weights", summary.duplicate_weight_ct},
+                     {"scoring_tile_size", summary.tile_size},
+                     {"scoring_tiles", summary.tile_ct},
                      {"output_bytes", summary.output_bytes}});
   }
   return summary;
@@ -586,15 +672,14 @@ struct ScoreFragmentReader::Impl {
   void* mapping = nullptr;
   uint64_t bytes = 0;
   uint64_t variant_ct = 0;
-  uint32_t block_size = 0;
-  uint32_t block_ct = 0;
+  uint32_t tile_size = 0;
+  uint32_t tile_ct = 0;
   uint64_t signature_lo = 0;
   uint64_t signature_hi = 0;
   uint64_t weight_ct = 0;
-  uint64_t block_directory_offset = 0;
-  uint64_t block_data_offset = 0;
+  uint64_t tile_directory_offset = 0;
+  uint64_t tile_data_offset = 0;
   std::vector<FragmentScore> scores;
-  std::unordered_set<uint32_t> score_indexes;
 
   ~Impl() {
     if (mapping) munmap(mapping, static_cast<size_t>(bytes));
@@ -624,37 +709,39 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
   const auto* bytes = static_cast<const unsigned char*>(impl_->mapping);
   if (std::memcmp(bytes, kMagic, sizeof(kMagic)) != 0 ||
       GetU32(bytes + 8) != kVersion || GetU32(bytes + 12) != kHeaderBytes) {
-    throw std::runtime_error(path + " has an invalid score-fragment header");
+    throw std::runtime_error(
+        path + " is not a score-major score fragment; rebuild it");
   }
   impl_->variant_ct = GetU64(bytes + 16);
-  impl_->block_size = GetU32(bytes + 24);
-  impl_->block_ct = GetU32(bytes + 28);
+  impl_->tile_size = GetU32(bytes + 24);
+  impl_->tile_ct = GetU32(bytes + 28);
   impl_->signature_lo = GetU64(bytes + 32);
   impl_->signature_hi = GetU64(bytes + 40);
   const uint32_t score_ct = GetU32(bytes + 48);
   impl_->weight_ct = GetU64(bytes + 56);
   const uint64_t score_records_offset = GetU64(bytes + 64);
-  impl_->block_directory_offset = GetU64(bytes + 72);
-  impl_->block_data_offset = GetU64(bytes + 80);
+  impl_->tile_directory_offset = GetU64(bytes + 72);
+  impl_->tile_data_offset = GetU64(bytes + 80);
   const uint64_t stated_bytes = GetU64(bytes + 88);
-  const uint64_t expected_block_ct =
-      impl_->block_size
-          ? (impl_->variant_ct + impl_->block_size - 1) / impl_->block_size
+  const uint64_t expected_tile_ct =
+      impl_->tile_size
+          ? (impl_->variant_ct + impl_->tile_size - 1) / impl_->tile_size
           : 0;
-  const bool valid = impl_->variant_ct && impl_->variant_ct <= UINT32_MAX &&
-                     impl_->block_size && impl_->block_ct == expected_block_ct &&
-                     score_ct && score_records_offset == kHeaderBytes &&
-                     score_records_offset <= impl_->block_directory_offset &&
-                     impl_->block_directory_offset <= impl_->block_data_offset &&
-                     impl_->block_data_offset <= stated_bytes &&
-                     stated_bytes == impl_->bytes &&
-                     static_cast<uint64_t>(impl_->block_ct + 1) * 8 <=
-                         impl_->block_data_offset - impl_->block_directory_offset;
+  const bool valid =
+      impl_->variant_ct && impl_->variant_ct <= UINT32_MAX &&
+      impl_->tile_size && impl_->tile_size <= kIndexMask &&
+      impl_->tile_ct == expected_tile_ct && score_ct &&
+      score_records_offset == kHeaderBytes &&
+      score_records_offset <= impl_->tile_directory_offset &&
+      impl_->tile_directory_offset <= impl_->tile_data_offset &&
+      impl_->tile_data_offset <= stated_bytes && stated_bytes == impl_->bytes &&
+      (static_cast<uint64_t>(impl_->tile_ct) + 1) * 8 <=
+          impl_->tile_data_offset - impl_->tile_directory_offset;
   if (!valid) {
     throw std::runtime_error(path + " has invalid score-fragment dimensions");
   }
   const unsigned char* cursor = bytes + score_records_offset;
-  const unsigned char* score_end = bytes + impl_->block_directory_offset;
+  const unsigned char* score_end = bytes + impl_->tile_directory_offset;
   impl_->scores.reserve(score_ct);
   std::unordered_set<std::string> seen_ids;
   for (uint32_t idx = 0; idx < score_ct; ++idx) {
@@ -663,10 +750,11 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
     if (score.score_id.empty() || !seen_ids.insert(score.score_id).second) {
       throw std::runtime_error(path + " has an invalid stable score ID");
     }
-    impl_->score_indexes.insert(idx);
     cursor = ReadString(cursor, score_end, path, &score.info.id);
     cursor = ReadString(cursor, score_end, path, &score.info.path);
-    if (score_end - cursor < 40) throw std::runtime_error(path + " is truncated");
+    if (score_end - cursor < 40) {
+      throw std::runtime_error(path + " is truncated");
+    }
     score.info.input_weight_ct = GetU64(cursor);
     score.info.zero_weight_ct = GetU64(cursor + 8);
     score.info.excluded_weight_ct = GetU64(cursor + 16);
@@ -678,156 +766,144 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
   if (cursor != score_end) {
     throw std::runtime_error(path + " has trailing score metadata");
   }
-  const unsigned char* directory = bytes + impl_->block_directory_offset;
-  uint64_t previous = impl_->block_data_offset;
-  for (uint32_t idx = 0; idx <= impl_->block_ct; ++idx) {
+  const unsigned char* directory = bytes + impl_->tile_directory_offset;
+  uint64_t previous = impl_->tile_data_offset;
+  for (uint32_t idx = 0; idx <= impl_->tile_ct; ++idx) {
     const uint64_t offset = GetU64(directory + static_cast<uint64_t>(idx) * 8);
     if (offset < previous || offset > impl_->bytes ||
-        (!idx && offset != impl_->block_data_offset) ||
-        (idx == impl_->block_ct && offset != impl_->bytes)) {
-      throw std::runtime_error(path + " has an invalid block directory");
+        (!idx && offset != impl_->tile_data_offset) ||
+        (idx == impl_->tile_ct && offset != impl_->bytes)) {
+      throw std::runtime_error(path + " has an invalid tile directory");
     }
     previous = offset;
   }
 }
 
 ScoreFragmentReader::~ScoreFragmentReader() = default;
-ScoreFragmentReader::ScoreFragmentReader(ScoreFragmentReader&&) noexcept = default;
-ScoreFragmentReader& ScoreFragmentReader::operator=(ScoreFragmentReader&&) noexcept =
+ScoreFragmentReader::ScoreFragmentReader(ScoreFragmentReader&&) noexcept =
     default;
+ScoreFragmentReader& ScoreFragmentReader::operator=(
+    ScoreFragmentReader&&) noexcept = default;
 
 uint64_t ScoreFragmentReader::variant_ct() const { return impl_->variant_ct; }
-uint32_t ScoreFragmentReader::block_size() const { return impl_->block_size; }
-uint32_t ScoreFragmentReader::block_ct() const { return impl_->block_ct; }
-uint64_t ScoreFragmentReader::signature_lo() const { return impl_->signature_lo; }
-uint64_t ScoreFragmentReader::signature_hi() const { return impl_->signature_hi; }
+uint32_t ScoreFragmentReader::tile_size() const { return impl_->tile_size; }
+uint32_t ScoreFragmentReader::tile_ct() const { return impl_->tile_ct; }
+uint64_t ScoreFragmentReader::signature_lo() const {
+  return impl_->signature_lo;
+}
+uint64_t ScoreFragmentReader::signature_hi() const {
+  return impl_->signature_hi;
+}
 uint64_t ScoreFragmentReader::weight_ct() const { return impl_->weight_ct; }
 uint64_t ScoreFragmentReader::file_bytes() const { return impl_->bytes; }
 const std::vector<FragmentScore>& ScoreFragmentReader::scores() const {
   return impl_->scores;
 }
 
-struct ScoreFragmentBlockCursor::Impl {
-  const unsigned char* cursor = nullptr;
-  const unsigned char* end = nullptr;
-  const unsigned char* edge_data = nullptr;
-  const std::unordered_set<uint32_t>* score_indexes = nullptr;
-  const std::string* path = nullptr;
-  uint32_t groups_remaining = 0;
-  uint32_t current_ordinal = 0;
-  uint32_t previous_ordinal = 0;
-  uint32_t edge_ct = 0;
-  uint32_t block_idx = 0;
-  uint32_t block_size = 0;
-  uint64_t variant_ct = 0;
-  bool has_previous = false;
-
-  void ParseCurrent() {
-    if (!groups_remaining) {
-      if (cursor != end) {
-        throw std::runtime_error(*path + " block has trailing data");
-      }
-      return;
-    }
-    if (end - cursor < 8) {
-      throw std::runtime_error(*path + " block is truncated");
-    }
-    current_ordinal = GetU32(cursor);
-    edge_ct = GetU32(cursor + 4);
-    edge_data = cursor + 8;
-    if (!edge_ct || current_ordinal >= variant_ct ||
-        current_ordinal / block_size != block_idx ||
-        (has_previous && current_ordinal <= previous_ordinal) ||
-        static_cast<uint64_t>(end - edge_data) <
-            static_cast<uint64_t>(edge_ct) * 12) {
-      throw std::runtime_error(*path + " has an invalid block record");
-    }
+ScoreMajorFragmentEdge ScoreFragmentScoreRow::edge(uint32_t edge_idx) const {
+  if (edge_idx >= edge_ct_) {
+    throw std::out_of_range("score-fragment score-row edge");
   }
-};
-
-ScoreFragmentBlockCursor::ScoreFragmentBlockCursor()
-    : impl_(std::make_unique<Impl>()) {}
-ScoreFragmentBlockCursor::~ScoreFragmentBlockCursor() = default;
-ScoreFragmentBlockCursor::ScoreFragmentBlockCursor(
-    ScoreFragmentBlockCursor&&) noexcept = default;
-ScoreFragmentBlockCursor& ScoreFragmentBlockCursor::operator=(
-    ScoreFragmentBlockCursor&&) noexcept = default;
-
-bool ScoreFragmentBlockCursor::done() const {
-  return !impl_->groups_remaining;
+  const unsigned char* cursor = edge_data_ + static_cast<uint64_t>(edge_idx) * 12;
+  const uint32_t variant_and_effect = GetU32(cursor);
+  const uint32_t local_variant_idx = variant_and_effect & kIndexMask;
+  const uint64_t bits = GetU64(cursor + 4);
+  double weight = 0.0;
+  std::memcpy(&weight, &bits, sizeof(weight));
+  if (local_variant_idx >= tile_variant_ct_ || !std::isfinite(weight)) {
+    throw std::runtime_error(*path_ + " has an invalid score-major edge");
+  }
+  const bool ref_effect = variant_and_effect & kRefEffectMask;
+  return {local_variant_idx, ref_effect ? -weight : weight, ref_effect};
 }
 
-uint32_t ScoreFragmentBlockCursor::ordinal() const {
-  if (done()) throw std::out_of_range("score-fragment block cursor");
-  return impl_->current_ordinal;
-}
-
-void ScoreFragmentBlockCursor::AppendEdges(std::vector<Edge>* edges) const {
-  if (done()) throw std::out_of_range("score-fragment block cursor");
-  const unsigned char* cursor = impl_->edge_data;
-  edges->reserve(edges->size() + impl_->edge_ct);
-  for (uint32_t edge_idx = 0; edge_idx < impl_->edge_ct; ++edge_idx) {
-    const uint32_t score_and_effect = GetU32(cursor);
-    const uint32_t score_idx = score_and_effect & kScoreIndexMask;
-    const uint64_t bits = GetU64(cursor + 4);
-    double weight = 0.0;
-    std::memcpy(&weight, &bits, sizeof(weight));
-    if (!std::isfinite(weight) || !impl_->score_indexes->count(score_idx)) {
-      throw std::runtime_error(*impl_->path +
-                               " has an invalid fragment weight record");
-    }
-    const bool ref_effect = score_and_effect & kRefEffectMask;
-    edges->push_back(
-        {score_idx, ref_effect ? -weight : weight, ref_effect});
-    cursor += 12;
+void ScoreFragmentTile::OrReferencedVariants(
+    std::vector<uint64_t>* words) const {
+  if (words->size() != bitmap_word_ct_) {
+    throw std::runtime_error("score-fragment bitmap shape mismatch");
+  }
+  for (uint32_t idx = 0; idx < bitmap_word_ct_; ++idx) {
+    (*words)[idx] |= GetU64(bitmap_data_ + static_cast<uint64_t>(idx) * 8);
   }
 }
 
-void ScoreFragmentBlockCursor::Next() {
-  if (done()) throw std::out_of_range("score-fragment block cursor");
-  impl_->cursor = impl_->edge_data + static_cast<uint64_t>(impl_->edge_ct) * 12;
-  impl_->previous_ordinal = impl_->current_ordinal;
-  impl_->has_previous = true;
-  --impl_->groups_remaining;
-  impl_->ParseCurrent();
-}
-
-ScoreFragmentBlockCursor ScoreFragmentReader::OpenBlock(
-    uint32_t block_idx) const {
-  if (block_idx >= impl_->block_ct) throw std::out_of_range("fragment block");
+ScoreFragmentTile ScoreFragmentReader::OpenTile(uint32_t tile_idx) const {
+  if (tile_idx >= impl_->tile_ct) {
+    throw std::out_of_range("score-fragment tile");
+  }
   const auto* bytes = static_cast<const unsigned char*>(impl_->mapping);
-  const auto* directory = bytes + impl_->block_directory_offset;
-  const uint64_t begin = GetU64(directory + static_cast<uint64_t>(block_idx) * 8);
+  const auto* directory = bytes + impl_->tile_directory_offset;
+  const uint64_t begin =
+      GetU64(directory + static_cast<uint64_t>(tile_idx) * 8);
   const uint64_t end =
-      GetU64(directory + static_cast<uint64_t>(block_idx + 1) * 8);
-  ScoreFragmentBlockCursor result;
-  result.impl_->cursor = bytes + begin;
-  result.impl_->end = bytes + end;
-  result.impl_->score_indexes = &impl_->score_indexes;
-  result.impl_->path = &impl_->path;
-  result.impl_->block_idx = block_idx;
-  result.impl_->block_size = impl_->block_size;
-  result.impl_->variant_ct = impl_->variant_ct;
-  if (result.impl_->end - result.impl_->cursor < 4) {
-    throw std::runtime_error(impl_->path + " block is truncated");
+      GetU64(directory + static_cast<uint64_t>(tile_idx + 1) * 8);
+  const unsigned char* cursor = bytes + begin;
+  const unsigned char* tile_end = bytes + end;
+  if (tile_end - cursor < 16) {
+    throw std::runtime_error(impl_->path + " tile is truncated");
   }
-  result.impl_->groups_remaining = GetU32(result.impl_->cursor);
-  result.impl_->cursor += 4;
-  result.impl_->ParseCurrent();
+  ScoreFragmentTile result;
+  result.tile_idx_ = tile_idx;
+  result.first_ordinal_ = tile_idx * impl_->tile_size;
+  result.variant_ct_ = GetU32(cursor);
+  result.referenced_variant_ct_ = GetU32(cursor + 4);
+  const uint32_t score_row_ct = GetU32(cursor + 8);
+  result.bitmap_word_ct_ = GetU32(cursor + 12);
+  cursor += 16;
+  const uint32_t expected_variant_ct = static_cast<uint32_t>(
+      std::min<uint64_t>(impl_->tile_size,
+                         impl_->variant_ct - result.first_ordinal_));
+  const uint32_t expected_bitmap_word_ct = (expected_variant_ct + 63) / 64;
+  if (result.variant_ct_ != expected_variant_ct ||
+      result.bitmap_word_ct_ != expected_bitmap_word_ct ||
+      static_cast<uint64_t>(tile_end - cursor) <
+          static_cast<uint64_t>(result.bitmap_word_ct_) * 8) {
+    throw std::runtime_error(impl_->path + " has an invalid tile header");
+  }
+  result.bitmap_data_ = cursor;
+  uint32_t observed_referenced_ct = 0;
+  for (uint32_t word_idx = 0; word_idx < result.bitmap_word_ct_; ++word_idx) {
+    uint64_t word = GetU64(cursor + static_cast<uint64_t>(word_idx) * 8);
+    if (word_idx + 1 == result.bitmap_word_ct_ &&
+        result.variant_ct_ % 64) {
+      const uint64_t valid_mask =
+          (uint64_t{1} << (result.variant_ct_ % 64)) - 1;
+      if (word & ~valid_mask) {
+        throw std::runtime_error(impl_->path + " has bits past the tile end");
+      }
+    }
+    observed_referenced_ct += Popcount(word);
+  }
+  if (observed_referenced_ct != result.referenced_variant_ct_) {
+    throw std::runtime_error(impl_->path + " tile bitmap count disagrees");
+  }
+  cursor += static_cast<uint64_t>(result.bitmap_word_ct_) * 8;
+  result.rows_.reserve(score_row_ct);
+  uint32_t previous_score_idx = UINT32_MAX;
+  for (uint32_t row_idx = 0; row_idx < score_row_ct; ++row_idx) {
+    if (tile_end - cursor < 8) {
+      throw std::runtime_error(impl_->path + " tile row is truncated");
+    }
+    ScoreFragmentScoreRow row;
+    row.local_score_idx_ = GetU32(cursor);
+    row.edge_ct_ = GetU32(cursor + 4);
+    row.tile_variant_ct_ = result.variant_ct_;
+    row.edge_data_ = cursor + 8;
+    row.path_ = &impl_->path;
+    if (row.local_score_idx_ >= impl_->scores.size() || !row.edge_ct_ ||
+        (row_idx && row.local_score_idx_ <= previous_score_idx) ||
+        static_cast<uint64_t>(tile_end - row.edge_data_) <
+            static_cast<uint64_t>(row.edge_ct_) * 12) {
+      throw std::runtime_error(impl_->path + " has an invalid tile score row");
+    }
+    previous_score_idx = row.local_score_idx_;
+    result.rows_.push_back(row);
+    cursor = row.edge_data_ + static_cast<uint64_t>(row.edge_ct_) * 12;
+  }
+  if (cursor != tile_end) {
+    throw std::runtime_error(impl_->path + " tile has trailing data");
+  }
   return result;
-}
-
-void ScoreFragmentReader::ReadBlock(
-    uint32_t block_idx, std::vector<IndexedVariantEdges>* variants) const {
-  variants->clear();
-  auto cursor = OpenBlock(block_idx);
-  while (!cursor.done()) {
-    IndexedVariantEdges variant;
-    variant.ordinal = cursor.ordinal();
-    cursor.AppendEdges(&variant.edges);
-    variants->push_back(std::move(variant));
-    cursor.Next();
-  }
 }
 
 }  // namespace pgensparsescore

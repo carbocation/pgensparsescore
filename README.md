@@ -74,7 +74,9 @@ columns. `SCORE_ID` is the durable identity. Weights store fragment-local
 score indices, so an existing fragment remains usable if a later release
 adds scores or changes the output column order. The compiler streams weight
 rows into variant blocks and sorts one block at a time; it does not retain the
-whole fragment in memory.
+whole fragment in memory. Within each output fragment, weights are stored by
+2,000-variant scoring tile and then by score. Fragments built by earlier
+versions used a different layout and must be rebuilt.
 
 The fragment list contains one path per compiled fragment:
 
@@ -105,19 +107,14 @@ pgensparsescore \
   --out results/cohort
 ```
 
-The scorer opens every fragment and merges the current variant block from
-each one. A PGEN variant is decoded once and its dosage is applied to all
-matching weights, regardless of the number of fragments. Memory is bounded by
-the index, the current variant's edges, cohort-location and frequency arrays,
-and the file-backed score matrix. Fragmentation therefore shortens and
-parallelizes the build without multiplying genotype reads. During scoring,
-the binary uses all physical cores visible to the process. `--threads N`
-overrides that default. Dense genotypes are scored in bounded blocks: the
-scorer groups a block's weights by output score, assigns each score row to one
-worker, and applies all of that row's weights before moving on. Sparse
-genotypes continue to use the carrier-only path. Neither path reads a genotype
-twice. `--scoring-kernel scalar` retains the earlier variant-at-a-time dense
-kernel for comparisons.
+For each tile, the scorer unions the variant bitmaps from every fragment and
+decodes each needed PGEN variant once. It keeps the tile's dense or sparse
+genotypes in memory, then gives different score rows to different worker
+threads. Each worker reads a score's weights in their stored order and updates
+that score's output row. The number of fragments therefore does not multiply
+genotype reads, and scoring does not need to merge millions of individual
+weight records at runtime. The binary uses all physical cores visible to the
+process by default; `--threads N` overrides that choice.
 
 ## Monolithic compiled catalogs
 
