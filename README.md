@@ -370,6 +370,41 @@ Additional outputs are:
 The JSON also records `variant_mapping_rows` (zero when `--variant-map` is not
 used), `pvar_variants_loaded`, and the storage mode of each input PGEN.
 
+For a large cohort, avoid writing every floating-point value as text. Use:
+
+```sh
+pgensparsescore \
+  --pfile-list cohort.pfiles.tsv \
+  --variant-index selected.index.bin \
+  --fragment-list fragments.tsv \
+  --score-schema score_schema.tsv \
+  --read-freq reference.acount.zst \
+  --missing-freq omit \
+  --output-format score-major-bin \
+  --out results/cohort
+```
+
+This writes `cohort.scores.f64le`, `cohort.samples.tsv`, the usual
+`cohort.score-metadata.tsv`, and `cohort.json`. The matrix has no header. It is
+little-endian float64 in score-major order, with its exact dimensions and file
+names recorded in the JSON. The scorer writes directly into the final matrix;
+it does not first create a wide text table.
+
+Convert it to sample-row, named-score-column Parquet with NumPy and PyArrow:
+
+```sh
+python3 tools/score_matrix_to_parquet.py \
+  --metadata results/cohort.json \
+  --score-metadata results/cohort.score-metadata.tsv \
+  --output results/cohort.scores.parquet
+```
+
+The converter memory-maps the matrix and writes bounded row groups. It does
+not load the complete score table into RAM. The Parquet column names come from
+the scorer's `SCORE` metadata column, which is the `COLUMN_NAME` chosen by the
+score schema. The converter also writes `cohort.scores.parquet.json` with the
+row and column counts and Parquet settings.
+
 ## Progress reporting
 
 Both catalog compilation and scoring can write a structured progress log:
@@ -395,10 +430,10 @@ decodes; the decode count is independent of the fragment count. It also reports
 the resolved thread count and how many score updates used the parallel kernel.
 
 The scorer uses a file-backed score-major matrix while applying variants,
-since that is the efficient update layout.  It transposes that working matrix
-in bounded-memory blocks when writing the sample-major table, then removes the
-working file.  Score-major layout is therefore an implementation detail, not
-part of the output contract.
+since that is the efficient update layout. With the default `wide-tsv` output,
+it transposes that matrix in bounded-memory blocks and removes the working
+file. With `score-major-bin`, the matrix itself is retained for direct Parquet
+conversion, avoiding the text-formatting pass.
 
 ## Scoring semantics
 

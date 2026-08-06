@@ -38,6 +38,11 @@
 
 namespace {
 
+enum class ScoreOutputFormat {
+  kWideTsv,
+  kScoreMajorBinary,
+};
+
 struct Options {
   std::string pgen;
   std::string pvar;
@@ -55,6 +60,7 @@ struct Options {
   std::string progress_interval_seconds;
   std::string threads;
   std::string dense_kernel;
+  std::string output_format;
   std::string out;
   pgensparsescore::MissingFrequencyPolicy missing_frequency_policy =
       pgensparsescore::MissingFrequencyPolicy::kCohort;
@@ -143,6 +149,7 @@ void PrintUsage(std::ostream& stream) {
       "                     [--read-freq FILE] \\\n"
       "                     [--progress-jsonl FILE] \\\n"
       "                     [--progress-interval-seconds N] \\\n"
+      "                     [--output-format wide-tsv|score-major-bin] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n"
       "  pgensparsescore --pfile-list FILE \\\n"
       "                     (--manifest FILE | --compiled-catalog FILE) \\\n"
@@ -150,6 +157,7 @@ void PrintUsage(std::ostream& stream) {
       "                     [--read-freq FILE] \\\n"
       "                     [--progress-jsonl FILE] \\\n"
       "                     [--progress-interval-seconds N] \\\n"
+      "                     [--output-format wide-tsv|score-major-bin] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
   stream <<
       "  pgensparsescore (--pgen FILE --pvar FILE --psam FILE | \\\n"
@@ -161,7 +169,36 @@ void PrintUsage(std::ostream& stream) {
       "                     [--progress-interval-seconds N] \\\n"
       "                     [--threads N] \\\n"
       "                     [--dense-kernel auto|direct|onemkl] \\\n"
+      "                     [--output-format wide-tsv|score-major-bin] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
+}
+
+ScoreOutputFormat ParseScoreOutputFormat(const std::string& value) {
+  if (value.empty() || value == "wide-tsv") {
+    return ScoreOutputFormat::kWideTsv;
+  }
+  if (value == "score-major-bin") {
+    return ScoreOutputFormat::kScoreMajorBinary;
+  }
+  throw std::runtime_error(
+      "--output-format must be wide-tsv or score-major-bin");
+}
+
+const char* ScoreOutputFormatName(ScoreOutputFormat format) {
+  switch (format) {
+    case ScoreOutputFormat::kWideTsv:
+      return "pgensparsescore-wide-tsv-v1";
+    case ScoreOutputFormat::kScoreMajorBinary:
+      return "pgensparsescore-score-major-f64-v1";
+  }
+  throw std::runtime_error("invalid score output format");
+}
+
+std::string ScoreOutputPath(const std::string& prefix,
+                            ScoreOutputFormat format) {
+  return prefix + (format == ScoreOutputFormat::kWideTsv
+                       ? ".scores.tsv.gz"
+                       : ".scores.f64le");
 }
 
 pgensparsescore::DenseScoringKernel ParseDenseScoringKernel(
@@ -498,6 +535,7 @@ Options ParseOptions(int argc, char** argv) {
       {"--progress-interval-seconds", &options.progress_interval_seconds},
       {"--threads", &options.threads},
       {"--dense-kernel", &options.dense_kernel},
+      {"--output-format", &options.output_format},
       {"--out", &options.out},
   };
   for (int idx = 1; idx < argc; ++idx) {
@@ -599,6 +637,7 @@ Options ParseOptions(int argc, char** argv) {
     throw std::runtime_error(
         "--dense-kernel onemkl requires a oneMKL-enabled build");
   }
+  ParseScoreOutputFormat(options.output_format);
   return options;
 }
 
@@ -700,6 +739,52 @@ void WriteWideScores(const std::string& prefix,
   }
 }
 
+void WriteSampleTable(const std::string& prefix,
+                      const std::vector<pgensparsescore::Sample>& samples) {
+  const std::string final_path = prefix + ".samples.tsv";
+  const std::string temporary_path = final_path + ".tmp";
+  RemoveFileOnExit remove_temporary(temporary_path);
+  std::ofstream output(temporary_path);
+  if (!output) throw std::runtime_error("cannot write sample table");
+  const bool has_fid = samples.front().fid.has_value();
+  output << (has_fid ? "FID\tIID\n" : "IID\n");
+  for (const auto& sample : samples) {
+    if (has_fid) output << *sample.fid << '\t';
+    output << sample.iid << '\n';
+  }
+  output.close();
+  if (!output) throw std::runtime_error("cannot finish sample table");
+  std::filesystem::rename(temporary_path, final_path);
+  remove_temporary.Release();
+}
+
+void FinishBinaryScores(
+    const std::string& prefix,
+    const std::vector<pgensparsescore::Sample>& samples,
+    const pgensparsescore::Catalog& catalog,
+    pgensparsescore::MappedMatrix* matrix, const std::string& working_path,
+    RemoveFileOnExit* remove_working,
+    pgensparsescore::ProgressReporter* progress) {
+  const uint16_t endian_probe = 1;
+  if (*reinterpret_cast<const uint8_t*>(&endian_probe) != 1) {
+    throw std::runtime_error(
+        "score-major binary output requires a little-endian machine");
+  }
+  matrix->Flush();
+  WriteSampleTable(prefix, samples);
+  const std::string final_path = ScoreOutputPath(
+      prefix, ScoreOutputFormat::kScoreMajorBinary);
+  std::filesystem::rename(working_path, final_path);
+  remove_working->Release();
+  if (progress) {
+    progress->Event("score", "scores_written",
+                    {{"sample_rows_written", samples.size()},
+                     {"score_columns", catalog.scores.size()},
+                     {"output_bytes", std::filesystem::file_size(final_path)}},
+                    {{"output_format", "score-major-bin"}});
+  }
+}
+
 bool SamplesEqual(const std::vector<pgensparsescore::Sample>& lhs,
                   const std::vector<pgensparsescore::Sample>& rhs) {
   if (lhs.size() != rhs.size()) {
@@ -792,7 +877,9 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    uint32_t scoring_thread_ct = 1,
                    pgensparsescore::DenseScoringKernel dense_kernel =
                        pgensparsescore::DenseScoringKernel::kDirect,
-                   uint32_t onemkl_thread_ct = 0) {
+                   uint32_t onemkl_thread_ct = 0,
+                   ScoreOutputFormat output_format =
+                       ScoreOutputFormat::kWideTsv) {
   {
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
@@ -816,7 +903,8 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
   {
     std::ofstream output(prefix + ".json");
     if (!output) throw std::runtime_error("cannot write JSON metadata");
-    const std::filesystem::path scores(prefix + ".scores.tsv.gz");
+    const std::filesystem::path scores(
+        ScoreOutputPath(prefix, output_format));
     const char* dense_kernel_used = "direct";
     if (score_fragment_ct) {
       if (stats.direct_dense_tile_ct && stats.onemkl_tile_ct) {
@@ -828,10 +916,22 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
       }
     }
     output << "{\n"
-           << "  \"format\": \"pgensparsescore-wide-tsv-v1\",\n"
+           << "  \"format\": \"" << ScoreOutputFormatName(output_format)
+           << "\",\n"
            << "  \"path\": \""
-           << pgensparsescore::JsonEscape(scores.filename().string()) << "\",\n"
-           << "  \"sample_id_columns\": "
+           << pgensparsescore::JsonEscape(scores.filename().string()) << "\",\n";
+    if (output_format == ScoreOutputFormat::kScoreMajorBinary) {
+      output << "  \"samples_path\": \""
+             << pgensparsescore::JsonEscape(
+                    std::filesystem::path(prefix + ".samples.tsv")
+                        .filename()
+                        .string())
+             << "\",\n"
+                "  \"dtype\": \"float64\",\n"
+                "  \"byte_order\": \"little-endian\",\n"
+                "  \"matrix_layout\": \"score-major\",\n";
+    }
+    output << "  \"sample_id_columns\": "
            << (has_fid ? "[\"FID\", \"IID\"]" : "[\"IID\"]") << ",\n"
            << "  \"sample_rows\": " << sample_ct << ",\n"
            << "  \"score_columns\": " << catalog.scores.size() << ",\n"
@@ -1029,7 +1129,11 @@ int RunFragmentScoring(
     }
   }
 
-  const std::string working_path = options.out + ".work.score-major.bin";
+  const auto output_format = ParseScoreOutputFormat(options.output_format);
+  const std::string working_path =
+      output_format == ScoreOutputFormat::kScoreMajorBinary
+          ? ScoreOutputPath(options.out, output_format) + ".tmp"
+          : options.out + ".work.score-major.bin";
   RemoveFileOnExit remove_working(working_path);
   uint64_t working_matrix_byte_ct = 0;
   const uint32_t scoring_thread_ct = options.threads.empty()
@@ -1071,16 +1175,23 @@ int RunFragmentScoring(
       stats.omitted_frequency_variant_ct +=
           support_index->missing_frequency_ct();
     }
-    WriteWideScores(options.out, samples, loaded.catalog, matrix, progress);
+    if (output_format == ScoreOutputFormat::kWideTsv) {
+      WriteWideScores(options.out, samples, loaded.catalog, matrix, progress);
+    } else {
+      FinishBinaryScores(options.out, samples, loaded.catalog, &matrix,
+                         working_path, &remove_working, progress);
+    }
   }
-  remove_working.RemoveNow();
+  if (output_format == ScoreOutputFormat::kWideTsv) {
+    remove_working.RemoveNow();
+  }
   WriteMetadata(
       options.out, samples.size(), samples.front().fid.has_value(),
       inputs.size(), frequencies ? frequencies->matched_row_ct : 0,
       variant_index.variant_ct(), indexed_pvar_variant_ct, storage_modes,
       "fragments", options.missing_frequency_policy, working_matrix_byte_ct,
       loaded.catalog, stats, loaded.fragments.size(), variant_index.variant_ct(),
-      scoring_thread_ct, dense_kernel, onemkl_thread_ct);
+      scoring_thread_ct, dense_kernel, onemkl_thread_ct, output_format);
   if (progress) {
     progress->Event(
         "score", "complete",
@@ -1114,9 +1225,10 @@ int RunFragmentScoring(
           stats.onemkl_multiply_nanoseconds},
          {"scoring_threads", scoring_thread_ct},
          {"onemkl_threads", onemkl_thread_ct},
-         {"imputed_values", stats.imputed_value_ct}},
+        {"imputed_values", stats.imputed_value_ct}},
         {{"dense_scoring_kernel_requested",
-          pgensparsescore::DenseScoringKernelName(dense_kernel)}});
+          pgensparsescore::DenseScoringKernelName(dense_kernel)},
+         {"output_format", ScoreOutputFormatName(output_format)}});
   }
   std::cerr << "wrote " << loaded.catalog.scores.size()
             << " named score columns for " << samples.size() << " samples from "
@@ -1471,7 +1583,11 @@ int main(int argc, char** argv) {
     input_by_variant.shrink_to_fit();
     local_index_by_variant.clear();
     local_index_by_variant.shrink_to_fit();
-    const std::string working_path = options.out + ".work.score-major.bin";
+    const auto output_format = ParseScoreOutputFormat(options.output_format);
+    const std::string working_path =
+        output_format == ScoreOutputFormat::kScoreMajorBinary
+            ? ScoreOutputPath(options.out, output_format) + ".tmp"
+            : options.out + ".work.score-major.bin";
     RemoveFileOnExit remove_working(working_path);
     uint64_t working_matrix_byte_ct = 0;
     std::vector<std::string> pgen_storage_modes(inputs.size());
@@ -1535,16 +1651,25 @@ int main(int argc, char** argv) {
         process(input_idx, inputs[input_idx], variants_by_input[input_idx],
                 catalog_by_input[input_idx], pvar_row_counts[input_idx]);
       }
-      WriteWideScores(options.out, samples, catalog, matrix, progress.get());
+      if (output_format == ScoreOutputFormat::kWideTsv) {
+        WriteWideScores(options.out, samples, catalog, matrix, progress.get());
+      } else {
+        FinishBinaryScores(options.out, samples, catalog, &matrix,
+                           working_path, &remove_working, progress.get());
+      }
     }
-    remove_working.RemoveNow();
+    if (output_format == ScoreOutputFormat::kWideTsv) {
+      remove_working.RemoveNow();
+    }
     WriteMetadata(options.out, samples.size(), samples.front().fid.has_value(),
                   inputs.size(), frequencies ? frequencies->size() : 0,
                   variant_map ? variant_map->size() : 0,
                   pvar_variant_ct, pgen_storage_modes,
                   compiled_catalog ? "compiled" : "manifest",
                   options.missing_frequency_policy, working_matrix_byte_ct,
-                  catalog, stats);
+                  catalog, stats, 0, 0, 1,
+                  pgensparsescore::DenseScoringKernel::kDirect, 0,
+                  output_format);
     if (progress) {
       progress->Event(
           "score", "complete",
@@ -1559,7 +1684,8 @@ int main(int argc, char** argv) {
            {"dense_weight_edges", stats.dense_edge_ct},
            {"sparse_score_updates", stats.sparse_update_ct},
            {"dense_score_updates", stats.dense_update_ct},
-           {"imputed_values", stats.imputed_value_ct}});
+           {"imputed_values", stats.imputed_value_ct}},
+          {{"output_format", ScoreOutputFormatName(output_format)}});
     }
     std::cerr << "wrote " << catalog.scores.size()
               << " named score columns for " << samples.size()

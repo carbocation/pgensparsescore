@@ -106,6 +106,22 @@ if(BUILD_TESTING)
               "${CMAKE_CURRENT_SOURCE_DIR}/tests/progress_test.py"
               --scorer "$<TARGET_FILE:pgensparsescore>"
     )
+    execute_process(
+      COMMAND "${Python3_EXECUTABLE}" -c "import numpy, pyarrow"
+      RESULT_VARIABLE _parquet_python_status
+      OUTPUT_QUIET
+      ERROR_QUIET
+    )
+    if(_parquet_python_status EQUAL 0)
+      add_test(
+        NAME score_matrix_to_parquet
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_score_matrix_to_parquet.py"
+      )
+    else()
+      message(STATUS
+        "NumPy or PyArrow not found; skipping score-matrix Parquet test")
+    endif()
   endif()
   if(Python3_Interpreter_FOUND AND PLINK2_EXECUTABLE)
     set(_integration_kernel_args)

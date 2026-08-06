@@ -11,6 +11,7 @@ import gzip
 import json
 import math
 import pathlib
+import struct
 import subprocess
 import tempfile
 
@@ -301,6 +302,65 @@ def main() -> None:
             score_results["single"][1],
             "projected score2",
         )
+        projected_binary_output = tmp / "projected-binary-result"
+        run(
+            args.scorer,
+            "--pgen",
+            str(pfile.with_suffix(".pgen")),
+            "--pvar",
+            str(pfile.with_suffix(".pvar")),
+            "--psam",
+            str(pfile.with_suffix(".psam")),
+            "--variant-index",
+            str(projected_index),
+            "--support-index",
+            str(projected_support),
+            "--fragment-list",
+            str(tmp / "projected-fragments.tsv"),
+            "--read-freq",
+            str(projected_frequency),
+            "--missing-freq",
+            "omit",
+            *dense_kernel_args,
+            "--output-format",
+            "score-major-bin",
+            "--out",
+            str(projected_binary_output),
+        )
+        binary_values = struct.unpack(
+            "<8d",
+            projected_binary_output.with_suffix(".scores.f64le").read_bytes(),
+        )
+        assert_close(
+            list(binary_values[:4]),
+            [0.0, 2.0, 4.0, 2.0 / 3.0],
+            "binary projected score1",
+        )
+        assert_close(
+            list(binary_values[4:]),
+            score_results["single"][1],
+            "binary projected score2",
+        )
+        if projected_binary_output.with_suffix(".samples.tsv").read_text() != (
+            "IID\ns1\ns2\ns3\ns4\n"
+        ):
+            raise AssertionError("binary sample table is wrong")
+        binary_metadata = json.loads(
+            projected_binary_output.with_suffix(".json").read_text()
+        )
+        if (
+            binary_metadata["format"]
+            != "pgensparsescore-score-major-f64-v1"
+            or binary_metadata["path"] != "projected-binary-result.scores.f64le"
+            or binary_metadata["samples_path"]
+            != "projected-binary-result.samples.tsv"
+            or binary_metadata["matrix_layout"] != "score-major"
+        ):
+            raise AssertionError("binary score metadata is wrong")
+        if projected_binary_output.with_suffix(".scores.tsv.gz").exists():
+            raise AssertionError("binary scoring unexpectedly wrote a wide TSV")
+        if projected_binary_output.with_suffix(".scores.f64le.tmp").exists():
+            raise AssertionError("binary scoring left its temporary matrix behind")
         with projected_output.with_suffix(".score-metadata.tsv").open(
             newline=""
         ) as handle:
