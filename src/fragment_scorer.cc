@@ -542,11 +542,6 @@ LoadedScoreFragments LoadScoreFragments(
       result.catalog.scores[output_idx] = fragment_score.info;
       auto& score = result.catalog.scores[output_idx];
       score.id = output_column;
-      score.matched_weight_ct = 0;
-      score.missing_variant_ct = 0;
-      score.missing_frequency_ct = 0;
-      score.ref_effect_ct = 0;
-      score.alt_effect_ct = 0;
       score.ref_effect_intercept = 0.0;
     }
   }
@@ -600,6 +595,9 @@ ScoreRunStats ScoreFragments(
   }
 
   ScoreRunStats stats;
+  for (const auto& score : catalog->scores) {
+    stats.omitted_frequency_edge_ct += score.missing_frequency_ct;
+  }
   std::vector<double> baselines(catalog->scores.size(), 0.0);
   ScoreMajorWorkers scoring_workers(thread_ct, matrix->column_ct(), &baselines,
                                     catalog, matrix);

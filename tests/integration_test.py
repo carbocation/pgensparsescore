@@ -178,6 +178,143 @@ def main() -> None:
         if multi_output.with_suffix(".work.score-major.bin").exists():
             raise AssertionError("working score-major matrix was not removed")
 
+        projected_frequency = tmp / "projected-reference.acount"
+        projected_frequency.write_text(
+            "#CHROM\tID\tREF\tALT\tREF_CT\tALT_CTS\tOBS_CT\n"
+            "1\tv1\tA\tG\t5\t1\t6\n"
+        )
+        (tmp / "projected-variants.tsv").write_text(
+            "SOURCE_ID\tTARGET_ID\tREF\tALT\n"
+            "v1\tv1\tA\tG\n"
+            "v2\tv2\tC\tT\n"
+            "missing\tmissing\tG\tA\n"
+        )
+        projected_index = tmp / "projected.index.bin"
+        run(
+            args.scorer,
+            "build-variant-index",
+            "--variant-list",
+            str(tmp / "projected-variants.tsv"),
+            "--out",
+            str(projected_index),
+        )
+        projected_support = tmp / "projected.support.bin"
+        run(
+            args.scorer,
+            "build-support-index",
+            "--variant-index",
+            str(projected_index),
+            "--pvar",
+            str(pfile.with_suffix(".pvar")),
+            "--read-freq",
+            str(projected_frequency),
+            "--out",
+            str(projected_support),
+        )
+        support_metadata = json.loads(
+            projected_support.with_suffix(".bin.json").read_text()
+        )
+        if (
+            support_metadata["usable_variants"] != 1
+            or support_metadata["missing_frequencies"] != 1
+            or support_metadata["missing_variants"] != 1
+        ):
+            raise AssertionError("projected support counts are wrong")
+
+        (tmp / "projected-score1.tsv").write_text(
+            WEIGHT_HEADER
+            + "v1\tG\tA\t2\n"
+            + "v2\tC\tT\t3\n"
+            + "missing\tA\tG\t5\n"
+        )
+        (tmp / "projected-score2.tsv").write_text(
+            WEIGHT_HEADER + "v1\tA\tG\t1\n"
+        )
+        (tmp / "projected-manifest.tsv").write_text(
+            "SCORE_ID\tCOLUMN_NAME\tPATH\n"
+            "source:score1\tscore1\tprojected-score1.tsv\n"
+            "source:score2\tscore2\tprojected-score2.tsv\n"
+        )
+        projected_fragment = tmp / "projected.fragment.bin"
+        run(
+            args.scorer,
+            "compile-fragment",
+            "--manifest",
+            str(tmp / "projected-manifest.tsv"),
+            "--variant-index",
+            str(projected_index),
+            "--support-index",
+            str(projected_support),
+            "--out",
+            str(projected_fragment),
+        )
+        fragment_metadata = json.loads(
+            projected_fragment.with_suffix(".bin.json").read_text()
+        )
+        if (
+            fragment_metadata["catalog_weights"] != 4
+            or fragment_metadata["weights"] != 2
+            or fragment_metadata["missing_variant_weights"] != 1
+            or fragment_metadata["missing_frequency_weights"] != 1
+        ):
+            raise AssertionError("projected fragment counts are wrong")
+        (tmp / "projected-fragments.tsv").write_text(
+            "FRAGMENT\nprojected.fragment.bin\n"
+        )
+        projected_output = tmp / "projected-result"
+        run(
+            args.scorer,
+            "--pgen",
+            str(pfile.with_suffix(".pgen")),
+            "--pvar",
+            str(pfile.with_suffix(".pvar")),
+            "--psam",
+            str(pfile.with_suffix(".psam")),
+            "--variant-index",
+            str(projected_index),
+            "--support-index",
+            str(projected_support),
+            "--fragment-list",
+            str(tmp / "projected-fragments.tsv"),
+            "--read-freq",
+            str(projected_frequency),
+            "--missing-freq",
+            "omit",
+            "--out",
+            str(projected_output),
+        )
+        with gzip.open(
+            projected_output.with_suffix(".scores.tsv.gz"), "rt", newline=""
+        ) as handle:
+            projected_rows = list(csv.DictReader(handle, delimiter="\t"))
+        assert_close(
+            [float(row["score1"]) for row in projected_rows],
+            [0.0, 2.0, 4.0, 2.0 / 3.0],
+            "projected score1",
+        )
+        assert_close(
+            [float(row["score2"]) for row in projected_rows],
+            score_results["single"][1],
+            "projected score2",
+        )
+        with projected_output.with_suffix(".score-metadata.tsv").open(
+            newline=""
+        ) as handle:
+            projected_qc = {
+                row["SCORE"]: row for row in csv.DictReader(handle, delimiter="\t")
+            }
+        score1_qc = projected_qc["score1"]
+        if (
+            score1_qc["CATALOG_WEIGHTS"] != "3"
+            or score1_qc["MATCHED_WEIGHTS"] != "2"
+            or score1_qc["MISSING_VARIANTS"] != "1"
+            or score1_qc["MISSING_FREQUENCIES"] != "1"
+            or score1_qc["SCORED_WEIGHTS"] != "1"
+            or score1_qc["ALT_EFFECTS"] != "1"
+            or score1_qc["REF_EFFECTS"] != "1"
+        ):
+            raise AssertionError(f"projected score QC is wrong: {score1_qc}")
+
         (tmp / "mapped-score1.tsv").write_text(
             WEIGHT_HEADER + "source-v1\tG\tA\t2\n" + "source-v2\tC\tT\t3\n"
         )

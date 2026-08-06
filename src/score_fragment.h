@@ -15,6 +15,7 @@ namespace pgensparsescore {
 struct ScoreFragmentCompileOptions {
   std::string manifest_path;
   std::string variant_index_path;
+  std::string support_index_path;
   std::string temporary_directory;
   std::string output_path;
 };
@@ -29,11 +30,14 @@ struct ScoreFragmentSummary {
   uint32_t tile_size = 0;
   uint32_t tile_ct = 0;
   uint32_t score_ct = 0;
+  uint64_t catalog_weight_ct = 0;
   uint64_t weight_ct = 0;
   uint64_t input_weight_ct = 0;
   uint64_t zero_weight_ct = 0;
   uint64_t excluded_weight_ct = 0;
   uint64_t duplicate_weight_ct = 0;
+  uint64_t missing_variant_weight_ct = 0;
+  uint64_t missing_frequency_weight_ct = 0;
   uint64_t output_bytes = 0;
 };
 

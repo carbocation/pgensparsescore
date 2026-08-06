@@ -21,6 +21,7 @@
 #include "pgen_reader.h"
 #include "scorer.h"
 #include "score_fragment.h"
+#include "support_index.h"
 #include "variant_index.h"
 
 namespace {
@@ -435,6 +436,44 @@ void TestScoreFragment() {
   index_options.output_path = index_path.string();
   pgensparsescore::BuildVariantIndex(index_options);
 
+  const auto pvar_path = directory / "reference.pvar";
+  const auto frequency_path = directory / "reference.acount";
+  const auto support_path = directory / "reference.support.bin";
+  {
+    std::ofstream output(pvar_path);
+    output << "#CHROM\tPOS\tID\tREF\tALT\n"
+           << "1\t100\ttarget-v1\tA\tG\n"
+           << "1\t200\ttarget-v2\tC\tT\n";
+  }
+  {
+    std::ofstream output(frequency_path);
+    output << "#CHROM\tID\tREF\tALT\tREF_CT\tALT_CTS\tOBS_CT\n"
+           << "1\ttarget-v1\tA\tG\t5\t1\t6\n";
+  }
+  pgensparsescore::SupportIndexBuildOptions support_options;
+  support_options.variant_index_path = index_path.string();
+  support_options.pvar_path = pvar_path.string();
+  support_options.frequency_path = frequency_path.string();
+  support_options.output_path = support_path.string();
+  const auto support_summary =
+      pgensparsescore::BuildSupportIndex(support_options);
+  if (support_summary.variant_ct != 3 ||
+      support_summary.usable_variant_ct != 1 ||
+      support_summary.missing_frequency_ct != 1 ||
+      support_summary.missing_variant_ct != 1) {
+    throw std::runtime_error("support-index summary is wrong");
+  }
+  {
+    pgensparsescore::SupportIndex support(support_path.string());
+    if (support.state(0) != pgensparsescore::VariantSupport::kUsable ||
+        support.state(1) !=
+            pgensparsescore::VariantSupport::kMissingFrequency ||
+        support.state(2) !=
+            pgensparsescore::VariantSupport::kMissingVariant) {
+      throw std::runtime_error("support-index states are wrong");
+    }
+  }
+
   const auto weights_a = directory / "weights-a.tsv";
   const auto weights_b = directory / "weights-b.tsv";
   const auto manifest = directory / "manifest.tsv";
@@ -462,47 +501,50 @@ void TestScoreFragment() {
   pgensparsescore::ScoreFragmentCompileOptions fragment_options;
   fragment_options.manifest_path = manifest.string();
   fragment_options.variant_index_path = index_path.string();
+  fragment_options.support_index_path = support_path.string();
   fragment_options.output_path = fragment_path.string();
   const auto summary =
       pgensparsescore::CompileScoreFragment(fragment_options);
-  if (summary.score_ct != 2 || summary.weight_ct != 4 ||
+  if (summary.score_ct != 2 || summary.catalog_weight_ct != 4 ||
+      summary.weight_ct != 2 || summary.missing_variant_weight_ct != 1 ||
+      summary.missing_frequency_weight_ct != 1 ||
       summary.input_weight_ct != 6 || summary.zero_weight_ct != 1 ||
       summary.excluded_weight_ct != 1 || summary.duplicate_weight_ct != 1) {
     throw std::runtime_error("score-fragment summary is wrong");
   }
   pgensparsescore::ScoreFragmentReader reader(fragment_path.string());
   if (reader.variant_ct() != 3 || reader.tile_size() != 2 ||
-      reader.tile_ct() != 2 || reader.weight_ct() != 4 ||
+      reader.tile_ct() != 2 || reader.weight_ct() != 2 ||
       reader.scores().size() != 2 ||
       reader.scores()[0].score_id != "source:a" ||
       reader.scores()[1].score_id != "source:b") {
     throw std::runtime_error("score-fragment metadata is wrong");
   }
   const auto tile0 = reader.OpenTile(0);
-  if (tile0.variant_ct() != 2 || tile0.referenced_variant_ct() != 2 ||
+  if (tile0.variant_ct() != 2 || tile0.referenced_variant_ct() != 1 ||
       tile0.rows().size() != 1 || tile0.rows()[0].local_score_idx() != 0 ||
-      tile0.rows()[0].edge_ct() != 3 ||
+      tile0.rows()[0].edge_ct() != 2 ||
       tile0.rows()[0].edge(0).local_variant_idx != 0 ||
-      tile0.rows()[0].edge(1).local_variant_idx != 0 ||
-      tile0.rows()[0].edge(2).local_variant_idx != 1 ||
-      !tile0.rows()[0].edge(2).ref_effect) {
+      tile0.rows()[0].edge(1).local_variant_idx != 0) {
     throw std::runtime_error("score-fragment first tile is wrong");
   }
   ExpectNear(tile0.rows()[0].edge(0).beta_alt +
                  tile0.rows()[0].edge(1).beta_alt,
              6.0,
              "fragment duplicate ALT weights");
-  ExpectNear(tile0.rows()[0].edge(2).beta_alt, -3.0,
-             "fragment REF orientation");
   const auto tile1 = reader.OpenTile(1);
-  if (tile1.variant_ct() != 1 || tile1.referenced_variant_ct() != 1 ||
-      tile1.rows().size() != 1 || tile1.rows()[0].local_score_idx() != 1 ||
-      tile1.rows()[0].edge_ct() != 1 ||
-      tile1.rows()[0].edge(0).local_variant_idx != 0) {
+  if (tile1.variant_ct() != 1 || tile1.referenced_variant_ct() != 0 ||
+      !tile1.rows().empty()) {
     throw std::runtime_error("score-fragment second tile is wrong");
   }
-  ExpectNear(tile1.rows()[0].edge(0).beta_alt, -1.0,
-             "fragment ALT weight");
+  if (reader.scores()[0].info.catalog_weight_ct != 3 ||
+      reader.scores()[0].info.matched_weight_ct != 1 ||
+      reader.scores()[0].info.missing_frequency_ct != 1 ||
+      reader.scores()[0].info.ref_effect_ct != 1 ||
+      reader.scores()[1].info.catalog_weight_ct != 1 ||
+      reader.scores()[1].info.missing_variant_ct != 1) {
+    throw std::runtime_error("projected fragment QC metadata is wrong");
+  }
   std::filesystem::remove_all(directory);
 }
 

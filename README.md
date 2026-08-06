@@ -57,6 +57,21 @@ Other input column names can be named explicitly with
 copy of the variant list. The index is a memory-mapped hash table. Building and reading
 it does not create a heap-resident set of every variant ID.
 
+If a reference dataset contains only a fraction of the selected variants,
+build a support index before compiling score fragments:
+
+```sh
+pgensparsescore build-support-index \
+  --variant-index selected.index.bin \
+  --pvar reference.pvar.zst \
+  --read-freq reference.acount.zst \
+  --out reference.support.bin
+```
+
+The support index classifies each selected variant as usable, absent from the
+PVAR, or lacking a usable frequency. It is tied to the variant index and is
+small enough to memory-map.
+
 Divide the score manifest into groups with similar estimated nonzero-weight
 counts. Each group is compiled independently and can run on a different
 machine:
@@ -65,6 +80,7 @@ machine:
 pgensparsescore compile-fragment \
   --manifest fragment_00000.tsv \
   --variant-index selected.index.bin \
+  --support-index reference.support.bin \
   --temp-dir work/fragment_00000 \
   --out fragment_00000.bin
 ```
@@ -76,7 +92,9 @@ adds scores or changes the output column order. The compiler streams weight
 rows into variant blocks and sorts one block at a time; it does not retain the
 whole fragment in memory. Within each output fragment, weights are stored by
 2,000-variant scoring tile and then by score. Fragments built by earlier
-versions used a different layout and must be rebuilt.
+versions used a different layout and must be rebuilt. When `--support-index`
+is supplied, the fragment retains the full score-level QC counts but stores
+only weights that can contribute in the reference dataset.
 
 The fragment list contains one path per compiled fragment:
 
@@ -100,6 +118,7 @@ Score all fragments together:
 pgensparsescore \
   --pfile-list cohort.pfiles.tsv \
   --variant-index selected.index.bin \
+  --support-index reference.support.bin \
   --fragment-list fragments.tsv \
   --score-schema score_schema.tsv \
   --read-freq reference.acount.zst \

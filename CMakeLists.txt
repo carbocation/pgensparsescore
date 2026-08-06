@@ -68,6 +68,7 @@ add_library(pgensparsescore_lib
   src/progress.cc
   src/scorer.cc
   src/score_fragment.cc
+  src/support_index.cc
   src/variant_index.cc
 )
 target_include_directories(pgensparsescore_lib PUBLIC src)

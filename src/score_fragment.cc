@@ -21,12 +21,13 @@
 #include <utility>
 
 #include "io.h"
+#include "support_index.h"
 
 namespace pgensparsescore {
 namespace {
 
-constexpr char kMagic[8] = {'P', 'G', 'S', 'S', 'S', 'M', 'J', 'R'};
-constexpr uint32_t kVersion = 1;
+constexpr char kMagic[8] = {'P', 'G', 'S', 'S', 'S', 'M', 'J', '2'};
+constexpr uint32_t kVersion = 2;
 constexpr uint32_t kHeaderBytes = 96;
 constexpr uint32_t kPreferredTileSize = 2000;
 constexpr uint32_t kRefEffectMask = 0x80000000U;
@@ -331,6 +332,16 @@ ScoreFragmentSummary CompileScoreFragment(
                              options.output_path);
   }
   VariantIndex index(options.variant_index_path);
+  std::unique_ptr<SupportIndex> support;
+  if (!options.support_index_path.empty()) {
+    support = std::make_unique<SupportIndex>(options.support_index_path);
+    if (support->variant_ct() != index.variant_ct() ||
+        support->signature_lo() != index.signature_lo() ||
+        support->signature_hi() != index.signature_hi()) {
+      throw std::runtime_error(
+          "support index was built for a different variant index");
+    }
+  }
   const auto manifest = ReadManifest(options.manifest_path);
   if (manifest.size() > kIndexMask) {
     throw std::runtime_error("score fragment contains too many scores");
@@ -351,6 +362,7 @@ ScoreFragmentSummary CompileScoreFragment(
                      {"scoring_tiles", tile_ct}},
                     {{"manifest", options.manifest_path},
                      {"variant_index", options.variant_index_path},
+                     {"support_index", options.support_index_path},
                      {"output", options.output_path}});
   }
 
@@ -430,6 +442,27 @@ ScoreFragmentSummary CompileScoreFragment(
         ++info.duplicate_weight_ct;
         ++summary.duplicate_weight_ct;
       }
+      ++info.catalog_weight_ct;
+      ++summary.catalog_weight_ct;
+      if (support) {
+        const VariantSupport state = support->state(*ordinal);
+        if (state == VariantSupport::kMissingVariant) {
+          ++info.missing_variant_ct;
+          ++summary.missing_variant_weight_ct;
+          continue;
+        }
+        if (state == VariantSupport::kMissingFrequency) {
+          ++info.matched_weight_ct;
+          ++info.missing_frequency_ct;
+          if (ref_effect) {
+            ++info.ref_effect_ct;
+          } else {
+            ++info.alt_effect_ct;
+          }
+          ++summary.missing_frequency_weight_ct;
+          continue;
+        }
+      }
       const uint32_t block_idx = *ordinal / index.block_size();
       if (!buckets[block_idx]) {
         const auto path = temp_directory /
@@ -449,7 +482,6 @@ ScoreFragmentSummary CompileScoreFragment(
         throw std::runtime_error("cannot write score-fragment bucket");
       }
       ++bucket_weight_ct[block_idx];
-      ++info.catalog_weight_ct;
       ++summary.weight_ct;
       if (progress && !(summary.input_weight_ct % 1000000)) {
         progress->MaybeEvent(
@@ -458,6 +490,11 @@ ScoreFragmentSummary CompileScoreFragment(
              {"score_files_total", manifest.size()},
              {"input_weights", summary.input_weight_ct},
              {"retained_weights", summary.weight_ct},
+             {"catalog_weights", summary.catalog_weight_ct},
+             {"missing_variant_weights",
+              summary.missing_variant_weight_ct},
+             {"missing_frequency_weights",
+              summary.missing_frequency_weight_ct},
              {"zero_weights", summary.zero_weight_ct},
              {"excluded_weights", summary.excluded_weight_ct},
              {"duplicate_weights", summary.duplicate_weight_ct}},
@@ -472,6 +509,10 @@ ScoreFragmentSummary CompileScoreFragment(
            {"score_files_total", manifest.size()},
            {"input_weights", summary.input_weight_ct},
            {"retained_weights", summary.weight_ct},
+           {"catalog_weights", summary.catalog_weight_ct},
+           {"missing_variant_weights", summary.missing_variant_weight_ct},
+           {"missing_frequency_weights",
+            summary.missing_frequency_weight_ct},
            {"zero_weights", summary.zero_weight_ct},
            {"excluded_weights", summary.excluded_weight_ct},
            {"duplicate_weights", summary.duplicate_weight_ct}},
@@ -505,6 +546,11 @@ ScoreFragmentSummary CompileScoreFragment(
     WriteU64(&output, score.info.excluded_weight_ct, temporary_output);
     WriteU64(&output, score.info.duplicate_weight_ct, temporary_output);
     WriteU64(&output, score.info.catalog_weight_ct, temporary_output);
+    WriteU64(&output, score.info.matched_weight_ct, temporary_output);
+    WriteU64(&output, score.info.missing_variant_ct, temporary_output);
+    WriteU64(&output, score.info.missing_frequency_ct, temporary_output);
+    WriteU64(&output, score.info.alt_effect_ct, temporary_output);
+    WriteU64(&output, score.info.ref_effect_ct, temporary_output);
   }
   const uint64_t tile_directory_offset = Position(&output, temporary_output);
   std::vector<uint64_t> tile_offsets(static_cast<uint64_t>(tile_ct) + 1, 0);
@@ -637,6 +683,11 @@ ScoreFragmentSummary CompileScoreFragment(
   if (weights_written != summary.weight_ct) {
     throw std::runtime_error("fragment weight count changed during serialization");
   }
+  if (summary.catalog_weight_ct !=
+      summary.weight_ct + summary.missing_variant_weight_ct +
+          summary.missing_frequency_weight_ct) {
+    throw std::runtime_error("fragment support counts do not add up");
+  }
   summary.output_bytes = tile_offsets.back();
   output.seekp(static_cast<std::streamoff>(tile_directory_offset));
   for (const uint64_t offset : tile_offsets) {
@@ -655,7 +706,12 @@ ScoreFragmentSummary CompileScoreFragment(
     progress->Event("fragment", "complete",
                     {{"scores", summary.score_ct},
                      {"input_weights", summary.input_weight_ct},
-                     {"retained_weights", summary.weight_ct},
+                    {"retained_weights", summary.weight_ct},
+                     {"catalog_weights", summary.catalog_weight_ct},
+                     {"missing_variant_weights",
+                      summary.missing_variant_weight_ct},
+                     {"missing_frequency_weights",
+                      summary.missing_frequency_weight_ct},
                      {"zero_weights", summary.zero_weight_ct},
                      {"excluded_weights", summary.excluded_weight_ct},
                      {"duplicate_weights", summary.duplicate_weight_ct},
@@ -744,6 +800,7 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
   const unsigned char* score_end = bytes + impl_->tile_directory_offset;
   impl_->scores.reserve(score_ct);
   std::unordered_set<std::string> seen_ids;
+  uint64_t metadata_supported_weight_ct = 0;
   for (uint32_t idx = 0; idx < score_ct; ++idx) {
     FragmentScore score;
     cursor = ReadString(cursor, score_end, path, &score.score_id);
@@ -752,7 +809,7 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
     }
     cursor = ReadString(cursor, score_end, path, &score.info.id);
     cursor = ReadString(cursor, score_end, path, &score.info.path);
-    if (score_end - cursor < 40) {
+    if (score_end - cursor < 80) {
       throw std::runtime_error(path + " is truncated");
     }
     score.info.input_weight_ct = GetU64(cursor);
@@ -760,11 +817,31 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
     score.info.excluded_weight_ct = GetU64(cursor + 16);
     score.info.duplicate_weight_ct = GetU64(cursor + 24);
     score.info.catalog_weight_ct = GetU64(cursor + 32);
-    cursor += 40;
+    score.info.matched_weight_ct = GetU64(cursor + 40);
+    score.info.missing_variant_ct = GetU64(cursor + 48);
+    score.info.missing_frequency_ct = GetU64(cursor + 56);
+    score.info.alt_effect_ct = GetU64(cursor + 64);
+    score.info.ref_effect_ct = GetU64(cursor + 72);
+    cursor += 80;
+    if (score.info.catalog_weight_ct < score.info.missing_variant_ct ||
+        score.info.catalog_weight_ct - score.info.missing_variant_ct <
+            score.info.missing_frequency_ct ||
+        score.info.matched_weight_ct != score.info.missing_frequency_ct ||
+        score.info.alt_effect_ct + score.info.ref_effect_ct !=
+            score.info.missing_frequency_ct) {
+      throw std::runtime_error(path + " has invalid projected score counts");
+    }
+    metadata_supported_weight_ct +=
+        score.info.catalog_weight_ct - score.info.missing_variant_ct -
+        score.info.missing_frequency_ct;
     impl_->scores.push_back(std::move(score));
   }
   if (cursor != score_end) {
     throw std::runtime_error(path + " has trailing score metadata");
+  }
+  if (metadata_supported_weight_ct != impl_->weight_ct) {
+    throw std::runtime_error(path +
+                             " has inconsistent supported-weight counts");
   }
   const unsigned char* directory = bytes + impl_->tile_directory_offset;
   uint64_t previous = impl_->tile_data_offset;
