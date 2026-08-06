@@ -26,6 +26,28 @@ ctest --test-dir build --output-on-failure
 Omit `PLINK_NG_SOURCE_DIR` to let CMake fetch the pinned revision.
 Development packages for zlib and zstd are also required.
 
+An optional oneMKL backend is available for dense genotype tiles. It leaves
+the carrier-only sparse path unchanged. Build it with Intel's `MKLConfig.cmake`
+on `CMAKE_PREFIX_PATH` or by setting `MKL_DIR`:
+
+```sh
+cmake -S . -B build-mkl \
+  -DPLINK_NG_SOURCE_DIR=/path/to/plink-ng \
+  -DPGENSPARSESCORE_USE_ONEMKL=ON \
+  -DMKL_LINK=static \
+  -DMKL_THREADING=intel_thread
+cmake --build build-mkl -j
+ctest --test-dir build-mkl --output-on-failure
+```
+
+The runtime default is `auto`. A oneMKL-enabled binary uses oneMKL for dense
+tiles with at least 50,000 weight edges and 100 million potential
+edge-by-sample updates; smaller tiles use direct scoring. These conservative
+cutoffs reflect the to2m and to40m reference benchmarks. A build without
+oneMKL uses direct scoring throughout. The
+`--dense-kernel direct` and `--dense-kernel onemkl` overrides are intended for
+benchmarks and diagnosis, not routine production scripts.
+
 The same command reads ordinary and conditional-rANS PGENs; storage mode is
 detected from the PGEN header. The JSON run metadata records the mode used for
 each input file.
@@ -132,8 +154,12 @@ genotypes in memory, then gives different score rows to different worker
 threads. Each worker reads a score's weights in their stored order and updates
 that score's output row. The number of fragments therefore does not multiply
 genotype reads, and scoring does not need to merge millions of individual
-weight records at runtime. The binary uses all physical cores visible to the
-process by default; `--threads N` overrides that choice.
+weight records at runtime. Both direct scoring and oneMKL use all logical CPUs
+visible to the process by default, including simultaneous-multithreading
+threads. `--threads N` caps both kernels when a lower thread count is useful.
+The JSON metadata and progress log record both thread counts, the requested
+policy, the number of tiles assigned to each kernel, and separate
+matrix-building, optimization, and multiplication times.
 
 ## Monolithic compiled catalogs
 

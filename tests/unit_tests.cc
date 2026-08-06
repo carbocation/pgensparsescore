@@ -667,7 +667,9 @@ void TestMultiFragmentSingleDecodeScoring() {
   auto score = [&](const std::vector<std::string>& paths,
                    const std::filesystem::path& matrix_path,
                    const std::string& schema_path = "",
-                   uint32_t thread_ct = 1) {
+                   uint32_t thread_ct = 1,
+                   pgensparsescore::DenseScoringKernel dense_kernel =
+                       pgensparsescore::DenseScoringKernel::kDirect) {
     auto loaded =
         pgensparsescore::LoadScoreFragments(paths, index, schema_path);
     pgensparsescore::PgenDosageReader reader(pgen_path.string());
@@ -679,7 +681,7 @@ void TestMultiFragmentSingleDecodeScoring() {
       stats = pgensparsescore::ScoreFragments(
           index, loaded.fragments, loaded.score_maps, locations, &frequencies,
           pgensparsescore::MissingFrequencyPolicy::kError, readers,
-          &loaded.catalog, &matrix, thread_ct);
+          &loaded.catalog, &matrix, thread_ct, dense_kernel, thread_ct);
       values.assign(matrix.Row(0), matrix.Row(0) + 2 * sample_ct);
     }
     std::filesystem::remove(matrix_path);
@@ -700,10 +702,36 @@ void TestMultiFragmentSingleDecodeScoring() {
       split.second.score_major_row_ct != 4 ||
       split.second.score_major_maximum_rows_per_tile != 2 ||
       split.second.score_major_maximum_edges_per_tile != 9 ||
+      !split.second.direct_dense_tile_ct || split.second.onemkl_tile_ct ||
       !split.second.score_major_scoring_nanoseconds ||
       combined.first != split.first) {
     throw std::runtime_error(
         "splitting score fragments changed scores or genotype decode count");
+  }
+  if (pgensparsescore::OneMklDenseScoringAvailable()) {
+    const auto onemkl = score(
+        {fragment_a_path.string(), fragment_b_path.string()},
+        directory / "onemkl.matrix.bin", "", 4,
+        pgensparsescore::DenseScoringKernel::kOneMkl);
+    if (!onemkl.second.onemkl_tile_ct ||
+        onemkl.second.dense_edge_ct != split.second.dense_edge_ct ||
+        onemkl.second.sparse_edge_ct != split.second.sparse_edge_ct ||
+        onemkl.first.size() != split.first.size()) {
+      throw std::runtime_error("oneMKL scoring accounting is wrong");
+    }
+    for (uint32_t idx = 0; idx < onemkl.first.size(); ++idx) {
+      ExpectNear(onemkl.first[idx], split.first[idx],
+                 "oneMKL and direct scoring differ");
+    }
+  }
+  const auto automatic = score(
+      {fragment_a_path.string(), fragment_b_path.string()},
+      directory / "automatic.matrix.bin", "", 4,
+      pgensparsescore::DenseScoringKernel::kAuto);
+  if (!automatic.second.direct_dense_tile_ct ||
+      automatic.second.onemkl_tile_ct || automatic.first != split.first) {
+    throw std::runtime_error(
+        "automatic dense scoring did not retain the direct small-tile path");
   }
   for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
     double dosage0 = sample_idx < 4096 ? 1.0 : 0.0;

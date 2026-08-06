@@ -71,6 +71,11 @@ struct ScoreRunStats {
   uint64_t score_major_maximum_rows_per_tile = 0;
   uint64_t score_major_maximum_edges_per_tile = 0;
   uint64_t score_major_scoring_nanoseconds = 0;
+  uint64_t direct_dense_tile_ct = 0;
+  uint64_t onemkl_tile_ct = 0;
+  uint64_t onemkl_matrix_build_nanoseconds = 0;
+  uint64_t onemkl_optimize_nanoseconds = 0;
+  uint64_t onemkl_multiply_nanoseconds = 0;
   uint64_t densified_sparse_variant_ct = 0;
   uint64_t copied_sparse_genotype_bytes = 0;
   uint64_t maximum_genotype_buffer_bytes = 0;

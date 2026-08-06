@@ -54,6 +54,7 @@ struct Options {
   std::string progress_jsonl;
   std::string progress_interval_seconds;
   std::string threads;
+  std::string dense_kernel;
   std::string out;
   pgensparsescore::MissingFrequencyPolicy missing_frequency_policy =
       pgensparsescore::MissingFrequencyPolicy::kCohort;
@@ -159,7 +160,23 @@ void PrintUsage(std::ostream& stream) {
       "                     [--progress-jsonl FILE] \\\n"
       "                     [--progress-interval-seconds N] \\\n"
       "                     [--threads N] \\\n"
+      "                     [--dense-kernel auto|direct|onemkl] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
+}
+
+pgensparsescore::DenseScoringKernel ParseDenseScoringKernel(
+    const std::string& value) {
+  if (value.empty() || value == "auto") {
+    return pgensparsescore::DenseScoringKernel::kAuto;
+  }
+  if (value == "direct") {
+    return pgensparsescore::DenseScoringKernel::kDirect;
+  }
+  if (value == "onemkl") {
+    return pgensparsescore::DenseScoringKernel::kOneMkl;
+  }
+  throw std::runtime_error(
+      "--dense-kernel must be auto, direct, or onemkl");
 }
 
 uint32_t ParsePositiveU32(const std::string& value,
@@ -205,6 +222,22 @@ uint32_t PhysicalCoreCount() {
 #endif
   const uint32_t logical_core_ct = std::thread::hardware_concurrency();
   return logical_core_ct ? logical_core_ct : 1;
+}
+
+uint32_t LogicalCoreCount() {
+#ifdef __linux__
+  cpu_set_t allowed_cpus;
+  CPU_ZERO(&allowed_cpus);
+  if (!sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus)) {
+    uint32_t allowed_cpu_ct = 0;
+    for (int cpu_idx = 0; cpu_idx < CPU_SETSIZE; ++cpu_idx) {
+      allowed_cpu_ct += CPU_ISSET(cpu_idx, &allowed_cpus) ? 1 : 0;
+    }
+    if (allowed_cpu_ct) return allowed_cpu_ct;
+  }
+#endif
+  const uint32_t logical_core_ct = std::thread::hardware_concurrency();
+  return logical_core_ct ? logical_core_ct : PhysicalCoreCount();
 }
 
 uint32_t ParseProgressInterval(const std::string& value) {
@@ -464,6 +497,7 @@ Options ParseOptions(int argc, char** argv) {
       {"--progress-jsonl", &options.progress_jsonl},
       {"--progress-interval-seconds", &options.progress_interval_seconds},
       {"--threads", &options.threads},
+      {"--dense-kernel", &options.dense_kernel},
       {"--out", &options.out},
   };
   for (int idx = 1; idx < argc; ++idx) {
@@ -524,6 +558,9 @@ Options ParseOptions(int argc, char** argv) {
   if (options.fragment_list.empty() && !options.threads.empty()) {
     throw std::runtime_error("--threads requires --fragment-list");
   }
+  if (options.fragment_list.empty() && !options.dense_kernel.empty()) {
+    throw std::runtime_error("--dense-kernel requires --fragment-list");
+  }
   if (!options.fragment_list.empty() && !options.variant_map.empty()) {
     throw std::runtime_error(
         "fragment indexes already contain ID aliases; do not use --variant-map");
@@ -555,6 +592,12 @@ Options ParseOptions(int argc, char** argv) {
   }
   if (!options.threads.empty()) {
     ParsePositiveU32(options.threads, "--threads");
+  }
+  const auto dense_kernel = ParseDenseScoringKernel(options.dense_kernel);
+  if (dense_kernel == pgensparsescore::DenseScoringKernel::kOneMkl &&
+      !pgensparsescore::OneMklDenseScoringAvailable()) {
+    throw std::runtime_error(
+        "--dense-kernel onemkl requires a oneMKL-enabled build");
   }
   return options;
 }
@@ -715,6 +758,12 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
                input.score_major_maximum_edges_per_tile);
   output->score_major_scoring_nanoseconds +=
       input.score_major_scoring_nanoseconds;
+  output->direct_dense_tile_ct += input.direct_dense_tile_ct;
+  output->onemkl_tile_ct += input.onemkl_tile_ct;
+  output->onemkl_matrix_build_nanoseconds +=
+      input.onemkl_matrix_build_nanoseconds;
+  output->onemkl_optimize_nanoseconds += input.onemkl_optimize_nanoseconds;
+  output->onemkl_multiply_nanoseconds += input.onemkl_multiply_nanoseconds;
   output->densified_sparse_variant_ct += input.densified_sparse_variant_ct;
   output->copied_sparse_genotype_bytes += input.copied_sparse_genotype_bytes;
   output->maximum_genotype_buffer_bytes =
@@ -740,7 +789,10 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    const pgensparsescore::ScoreRunStats& stats,
                    uint32_t score_fragment_ct = 0,
                    uint64_t variant_index_variant_ct = 0,
-                   uint32_t scoring_thread_ct = 1) {
+                   uint32_t scoring_thread_ct = 1,
+                   pgensparsescore::DenseScoringKernel dense_kernel =
+                       pgensparsescore::DenseScoringKernel::kDirect,
+                   uint32_t onemkl_thread_ct = 0) {
   {
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
@@ -765,6 +817,16 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
     std::ofstream output(prefix + ".json");
     if (!output) throw std::runtime_error("cannot write JSON metadata");
     const std::filesystem::path scores(prefix + ".scores.tsv.gz");
+    const char* dense_kernel_used = "direct";
+    if (score_fragment_ct) {
+      if (stats.direct_dense_tile_ct && stats.onemkl_tile_ct) {
+        dense_kernel_used = "mixed";
+      } else if (stats.onemkl_tile_ct) {
+        dense_kernel_used = "onemkl";
+      } else if (!stats.direct_dense_tile_ct) {
+        dense_kernel_used = "none";
+      }
+    }
     output << "{\n"
            << "  \"format\": \"pgensparsescore-wide-tsv-v1\",\n"
            << "  \"path\": \""
@@ -793,6 +855,12 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
            << ",\n"
            << "  \"scoring_threads\": " << scoring_thread_ct << ",\n"
+           << "  \"onemkl_threads\": " << onemkl_thread_ct << ",\n"
+           << "  \"dense_scoring_kernel_requested\": \""
+           << pgensparsescore::DenseScoringKernelName(dense_kernel)
+           << "\",\n"
+           << "  \"dense_scoring_kernel_used\": \""
+           << dense_kernel_used << "\",\n"
            << "  \"scoring_layout\": \""
            << (score_fragment_ct ? "score-major-tiles" : "variant-major")
            << "\",\n"
@@ -819,6 +887,15 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << stats.score_major_maximum_edges_per_tile << ",\n"
            << "  \"score_major_scoring_nanoseconds\": "
            << stats.score_major_scoring_nanoseconds << ",\n"
+           << "  \"direct_dense_tiles\": " << stats.direct_dense_tile_ct
+           << ",\n"
+           << "  \"onemkl_tiles\": " << stats.onemkl_tile_ct << ",\n"
+           << "  \"onemkl_matrix_build_nanoseconds\": "
+           << stats.onemkl_matrix_build_nanoseconds << ",\n"
+           << "  \"onemkl_optimize_nanoseconds\": "
+           << stats.onemkl_optimize_nanoseconds << ",\n"
+           << "  \"onemkl_multiply_nanoseconds\": "
+           << stats.onemkl_multiply_nanoseconds << ",\n"
            << "  \"densified_sparse_variants\": "
            << stats.densified_sparse_variant_ct << ",\n"
            << "  \"copied_sparse_genotype_bytes\": "
@@ -956,9 +1033,15 @@ int RunFragmentScoring(
   RemoveFileOnExit remove_working(working_path);
   uint64_t working_matrix_byte_ct = 0;
   const uint32_t scoring_thread_ct = options.threads.empty()
-                                         ? PhysicalCoreCount()
+                                         ? LogicalCoreCount()
                                          : ParsePositiveU32(options.threads,
                                                             "--threads");
+  const auto dense_kernel = ParseDenseScoringKernel(options.dense_kernel);
+  const uint32_t onemkl_thread_ct =
+      dense_kernel != pgensparsescore::DenseScoringKernel::kDirect &&
+              pgensparsescore::OneMklDenseScoringAvailable()
+          ? (options.threads.empty() ? LogicalCoreCount() : scoring_thread_ct)
+          : 0;
   pgensparsescore::ScoreRunStats stats;
   {
     pgensparsescore::MappedMatrix matrix(
@@ -972,13 +1055,16 @@ int RunFragmentScoring(
            {"score_columns", loaded.catalog.scores.size()},
            {"score_fragments", loaded.fragments.size()},
            {"fragment_weights", loaded.weight_ct},
-           {"scoring_threads", scoring_thread_ct}});
+           {"scoring_threads", scoring_thread_ct},
+           {"onemkl_threads", onemkl_thread_ct}},
+          {{"dense_scoring_kernel_requested",
+            pgensparsescore::DenseScoringKernelName(dense_kernel)}});
     }
     stats = pgensparsescore::ScoreFragments(
         variant_index, loaded.fragments, loaded.score_maps, locations,
         frequencies ? &*frequencies : nullptr,
         options.missing_frequency_policy, readers, &loaded.catalog, &matrix,
-        scoring_thread_ct, progress);
+        scoring_thread_ct, dense_kernel, onemkl_thread_ct, progress);
     if (support_index) {
       stats.missing_frequency_variant_ct +=
           support_index->missing_frequency_ct();
@@ -994,7 +1080,7 @@ int RunFragmentScoring(
       variant_index.variant_ct(), indexed_pvar_variant_ct, storage_modes,
       "fragments", options.missing_frequency_policy, working_matrix_byte_ct,
       loaded.catalog, stats, loaded.fragments.size(), variant_index.variant_ct(),
-      scoring_thread_ct);
+      scoring_thread_ct, dense_kernel, onemkl_thread_ct);
   if (progress) {
     progress->Event(
         "score", "complete",
@@ -1014,12 +1100,23 @@ int RunFragmentScoring(
          {"score_major_rows", stats.score_major_row_ct},
          {"score_major_scoring_nanoseconds",
           stats.score_major_scoring_nanoseconds},
+         {"direct_dense_tiles", stats.direct_dense_tile_ct},
          {"densified_sparse_variants",
           stats.densified_sparse_variant_ct},
          {"maximum_genotype_buffer_bytes",
           stats.maximum_genotype_buffer_bytes},
+         {"onemkl_tiles", stats.onemkl_tile_ct},
+         {"onemkl_matrix_build_nanoseconds",
+          stats.onemkl_matrix_build_nanoseconds},
+         {"onemkl_optimize_nanoseconds",
+          stats.onemkl_optimize_nanoseconds},
+         {"onemkl_multiply_nanoseconds",
+          stats.onemkl_multiply_nanoseconds},
          {"scoring_threads", scoring_thread_ct},
-         {"imputed_values", stats.imputed_value_ct}});
+         {"onemkl_threads", onemkl_thread_ct},
+         {"imputed_values", stats.imputed_value_ct}},
+        {{"dense_scoring_kernel_requested",
+          pgensparsescore::DenseScoringKernelName(dense_kernel)}});
   }
   std::cerr << "wrote " << loaded.catalog.scores.size()
             << " named score columns for " << samples.size() << " samples from "

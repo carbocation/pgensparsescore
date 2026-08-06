@@ -9,12 +9,17 @@
 #include <filesystem>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+
+#ifdef PGENSPARSESCORE_USE_ONEMKL
+#include <mkl.h>
+#endif
 
 #include "io.h"
 #include "scorer.h"
@@ -80,6 +85,12 @@ struct ScoreRowWorkStats {
   uint64_t sparse_update_ct = 0;
 };
 
+struct DenseEdge {
+  uint32_t output_score_idx = 0;
+  uint32_t dense_variant_idx = 0;
+  double beta_alt = 0.0;
+};
+
 void AddScaledDosages(const double* input, double beta, uint32_t sample_ct,
                       double* output) {
   for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
@@ -97,7 +108,8 @@ class ScoreMajorWorkers {
         baselines_(baselines),
         catalog_(catalog),
         matrix_(matrix),
-        worker_stats_(thread_ct) {
+        worker_stats_(thread_ct),
+        dense_edges_(thread_ct) {
     if (!thread_ct_ || !sample_ct_ || !baselines_ || !catalog_ || !matrix_) {
       throw std::runtime_error("invalid score-major worker configuration");
     }
@@ -121,18 +133,24 @@ class ScoreMajorWorkers {
       const std::vector<ScoreRowTask>& tasks,
       const std::vector<TileVariantState>& variants,
       const std::vector<double>& dense_dosages,
-      const std::vector<StoredSparseDosage>& sparse_dosages) {
+      const std::vector<StoredSparseDosage>& sparse_dosages,
+      DenseScoringKernel dense_kernel) {
     if (tasks.empty()) return {};
+    if (dense_kernel == DenseScoringKernel::kAuto) {
+      throw std::runtime_error("score-major worker received unresolved kernel");
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       tasks_ = &tasks;
       variants_ = &variants;
       dense_dosages_ = &dense_dosages;
       sparse_dosages_ = &sparse_dosages;
+      dense_kernel_ = dense_kernel;
       next_task_.store(0);
       worker_error_ = nullptr;
       std::fill(worker_stats_.begin(), worker_stats_.end(),
                 ScoreRowWorkStats{});
+      for (auto& edges : dense_edges_) edges.clear();
       pending_worker_ct_ = thread_ct_ - 1;
       ++generation_;
     }
@@ -156,8 +174,13 @@ class ScoreMajorWorkers {
     return result;
   }
 
+  const std::vector<std::vector<DenseEdge>>& dense_edges() const {
+    return dense_edges_;
+  }
+
  private:
-  void ApplyTask(const ScoreRowTask& task, ScoreRowWorkStats* stats) {
+  void ApplyTask(const ScoreRowTask& task, uint32_t worker_idx,
+                 ScoreRowWorkStats* stats) {
     if (!task.row || task.output_score_idx >= catalog_->scores.size()) {
       throw std::runtime_error("invalid score-major row task");
     }
@@ -196,10 +219,15 @@ class ScoreMajorWorkers {
       }
       ++stats->scored_edge_ct;
       if (variant.storage == TileVariantStorage::kDense) {
-        const double* input =
-            dense_dosages_->data() +
-            static_cast<uint64_t>(variant.storage_idx) * sample_ct_;
-        AddScaledDosages(input, edge.beta_alt, sample_ct_, output);
+        if (dense_kernel_ == DenseScoringKernel::kDirect) {
+          const double* input =
+              dense_dosages_->data() +
+              static_cast<uint64_t>(variant.storage_idx) * sample_ct_;
+          AddScaledDosages(input, edge.beta_alt, sample_ct_, output);
+        } else {
+          dense_edges_[worker_idx].push_back(
+              {task.output_score_idx, variant.storage_idx, edge.beta_alt});
+        }
         ++stats->dense_edge_ct;
         stats->dense_update_ct += sample_ct_;
       } else {
@@ -227,7 +255,8 @@ class ScoreMajorWorkers {
       for (;;) {
         const uint32_t task_idx = next_task_.fetch_add(1);
         if (task_idx >= tasks_->size()) return;
-        ApplyTask((*tasks_)[task_idx], &worker_stats_[worker_idx]);
+        ApplyTask((*tasks_)[task_idx], worker_idx,
+                  &worker_stats_[worker_idx]);
       }
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -260,8 +289,10 @@ class ScoreMajorWorkers {
   std::vector<double>* baselines_;
   Catalog* catalog_;
   MappedMatrix* matrix_;
+  DenseScoringKernel dense_kernel_ = DenseScoringKernel::kDirect;
   std::vector<std::thread> workers_;
   std::vector<ScoreRowWorkStats> worker_stats_;
+  std::vector<std::vector<DenseEdge>> dense_edges_;
   std::mutex mutex_;
   std::condition_variable start_;
   std::condition_variable done_;
@@ -276,7 +307,197 @@ class ScoreMajorWorkers {
   std::exception_ptr worker_error_;
 };
 
+struct OneMklTileStats {
+  uint64_t matrix_build_nanoseconds = 0;
+  uint64_t optimize_nanoseconds = 0;
+  uint64_t multiply_nanoseconds = 0;
+};
+
+constexpr uint64_t kOneMklMinimumTileEdges = 50000;
+constexpr uint64_t kOneMklMinimumPotentialUpdates = 100000000;
+
+DenseScoringKernel ResolveDenseScoringKernel(DenseScoringKernel requested,
+                                             uint64_t tile_edge_ct,
+                                             uint32_t sample_ct) {
+  if (requested != DenseScoringKernel::kAuto) return requested;
+  if (OneMklDenseScoringAvailable() &&
+      tile_edge_ct >= kOneMklMinimumTileEdges &&
+      tile_edge_ct * sample_ct >= kOneMklMinimumPotentialUpdates) {
+    return DenseScoringKernel::kOneMkl;
+  }
+  return DenseScoringKernel::kDirect;
+}
+
+#ifdef PGENSPARSESCORE_USE_ONEMKL
+
+const char* SparseStatusName(sparse_status_t status) {
+  switch (status) {
+    case SPARSE_STATUS_SUCCESS:
+      return "success";
+    case SPARSE_STATUS_NOT_INITIALIZED:
+      return "not initialized";
+    case SPARSE_STATUS_ALLOC_FAILED:
+      return "allocation failed";
+    case SPARSE_STATUS_INVALID_VALUE:
+      return "invalid value";
+    case SPARSE_STATUS_EXECUTION_FAILED:
+      return "execution failed";
+    case SPARSE_STATUS_INTERNAL_ERROR:
+      return "internal error";
+    case SPARSE_STATUS_NOT_SUPPORTED:
+      return "not supported";
+  }
+  return "unknown error";
+}
+
+void RequireSparseSuccess(sparse_status_t status,
+                          const std::string& operation) {
+  if (status != SPARSE_STATUS_SUCCESS) {
+    throw std::runtime_error("oneMKL " + operation + " failed: " +
+                             SparseStatusName(status));
+  }
+}
+
+class MklSparseMatrix {
+ public:
+  ~MklSparseMatrix() {
+    if (value_) mkl_sparse_destroy(value_);
+  }
+
+  sparse_matrix_t* address() { return &value_; }
+  sparse_matrix_t value() const { return value_; }
+
+ private:
+  sparse_matrix_t value_ = nullptr;
+};
+
+void ConfigureOneMklThreads(uint32_t thread_ct) {
+  mkl_set_dynamic(0);
+  mkl_set_num_threads(static_cast<int>(thread_ct));
+}
+
+OneMklTileStats ApplyOneMklDenseEdges(
+    const std::vector<std::vector<DenseEdge>>& worker_edges,
+    const std::vector<double>& dense_dosages, uint32_t sample_ct,
+    MappedMatrix* output) {
+  if (!sample_ct || !output || output->column_ct() != sample_ct ||
+      dense_dosages.size() % sample_ct) {
+    throw std::runtime_error("invalid oneMKL dense-scoring inputs");
+  }
+  const uint64_t dense_variant_ct64 = dense_dosages.size() / sample_ct;
+  constexpr auto kMaximumMklInt = std::numeric_limits<MKL_INT>::max();
+  if (!dense_variant_ct64 || dense_variant_ct64 > kMaximumMklInt ||
+      output->row_ct() > kMaximumMklInt || sample_ct > kMaximumMklInt) {
+    throw std::runtime_error("oneMKL dense-scoring dimensions are unsupported");
+  }
+  const auto build_started = std::chrono::steady_clock::now();
+  std::vector<MKL_INT> row_offsets(output->row_ct() + 1, 0);
+  uint64_t edge_ct = 0;
+  for (const auto& edges : worker_edges) {
+    for (const auto& edge : edges) {
+      if (edge.output_score_idx >= output->row_ct() ||
+          edge.dense_variant_idx >= dense_variant_ct64 ||
+          row_offsets[edge.output_score_idx + 1] == kMaximumMklInt) {
+        throw std::runtime_error("invalid oneMKL dense edge");
+      }
+      ++row_offsets[edge.output_score_idx + 1];
+      ++edge_ct;
+    }
+  }
+  if (!edge_ct) return {};
+  if (edge_ct > kMaximumMklInt) {
+    throw std::runtime_error("oneMKL tile contains too many dense edges");
+  }
+  for (uint32_t row_idx = 0; row_idx < output->row_ct(); ++row_idx) {
+    row_offsets[row_idx + 1] += row_offsets[row_idx];
+  }
+  std::vector<MKL_INT> columns(static_cast<size_t>(edge_ct));
+  std::vector<double> values(static_cast<size_t>(edge_ct));
+  std::vector<MKL_INT> next = row_offsets;
+  for (const auto& edges : worker_edges) {
+    for (const auto& edge : edges) {
+      const MKL_INT destination = next[edge.output_score_idx]++;
+      columns[destination] = static_cast<MKL_INT>(edge.dense_variant_idx);
+      values[destination] = edge.beta_alt;
+    }
+  }
+  MklSparseMatrix weights;
+  RequireSparseSuccess(
+      mkl_sparse_d_create_csr(
+          weights.address(), SPARSE_INDEX_BASE_ZERO,
+          static_cast<MKL_INT>(output->row_ct()),
+          static_cast<MKL_INT>(dense_variant_ct64), row_offsets.data(),
+          row_offsets.data() + 1, columns.data(), values.data()),
+      "CSR construction");
+  OneMklTileStats result;
+  result.matrix_build_nanoseconds = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - build_started)
+          .count());
+
+  matrix_descr descriptor{};
+  descriptor.type = SPARSE_MATRIX_TYPE_GENERAL;
+  const auto optimize_started = std::chrono::steady_clock::now();
+  RequireSparseSuccess(
+      mkl_sparse_set_mm_hint(
+          weights.value(), SPARSE_OPERATION_NON_TRANSPOSE, descriptor,
+          SPARSE_LAYOUT_ROW_MAJOR, static_cast<MKL_INT>(sample_ct), 1),
+      "matrix-multiply hint");
+  RequireSparseSuccess(mkl_sparse_optimize(weights.value()),
+                       "matrix optimization");
+  result.optimize_nanoseconds = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - optimize_started)
+          .count());
+
+  const auto multiply_started = std::chrono::steady_clock::now();
+  RequireSparseSuccess(
+      mkl_sparse_d_mm(
+          SPARSE_OPERATION_NON_TRANSPOSE, 1.0, weights.value(), descriptor,
+          SPARSE_LAYOUT_ROW_MAJOR, dense_dosages.data(),
+          static_cast<MKL_INT>(sample_ct), static_cast<MKL_INT>(sample_ct),
+          1.0, output->Row(0), static_cast<MKL_INT>(sample_ct)),
+      "matrix multiplication");
+  result.multiply_nanoseconds = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - multiply_started)
+          .count());
+  return result;
+}
+
+#else
+
+void ConfigureOneMklThreads(uint32_t) {}
+
+OneMklTileStats ApplyOneMklDenseEdges(
+    const std::vector<std::vector<DenseEdge>>&,
+    const std::vector<double>&, uint32_t, MappedMatrix*) {
+  throw std::runtime_error("oneMKL dense scoring is not available");
+}
+
+#endif
+
 }  // namespace
+
+const char* DenseScoringKernelName(DenseScoringKernel kernel) {
+  switch (kernel) {
+    case DenseScoringKernel::kAuto:
+      return "auto";
+    case DenseScoringKernel::kDirect:
+      return "direct";
+    case DenseScoringKernel::kOneMkl:
+      return "onemkl";
+  }
+  throw std::runtime_error("invalid dense scoring kernel");
+}
+
+bool OneMklDenseScoringAvailable() {
+#ifdef PGENSPARSESCORE_USE_ONEMKL
+  return true;
+#else
+  return false;
+#endif
+}
 
 std::vector<std::string> ReadScoreFragmentList(const std::string& path) {
   LineReader reader(path);
@@ -567,7 +788,9 @@ ScoreRunStats ScoreFragments(
     const IndexedFrequencyTable* frequencies,
     MissingFrequencyPolicy missing_frequency_policy,
     const std::vector<PgenDosageReader*>& readers, Catalog* catalog,
-    MappedMatrix* matrix, uint32_t thread_ct, ProgressReporter* progress) {
+    MappedMatrix* matrix, uint32_t thread_ct,
+    DenseScoringKernel dense_kernel, uint32_t onemkl_thread_ct,
+    ProgressReporter* progress) {
   if (locations.size() != index.variant_ct() || fragments.empty() ||
       score_maps.size() != fragments.size() ||
       readers.empty() || matrix->row_ct() != catalog->scores.size() ||
@@ -585,6 +808,18 @@ ScoreRunStats ScoreFragments(
   if (!frequencies && missing_frequency_policy != MissingFrequencyPolicy::kCohort) {
     throw std::runtime_error(
         "error and omit missing-frequency policies require frequencies");
+  }
+  if (dense_kernel == DenseScoringKernel::kOneMkl &&
+      !OneMklDenseScoringAvailable()) {
+    throw std::runtime_error(
+        "oneMKL dense scoring requires a oneMKL-enabled build");
+  }
+  uint32_t configured_onemkl_thread_ct = 0;
+  if (dense_kernel != DenseScoringKernel::kDirect &&
+      OneMklDenseScoringAvailable()) {
+    configured_onemkl_thread_ct =
+        onemkl_thread_ct ? onemkl_thread_ct : thread_ct;
+    ConfigureOneMklThreads(configured_onemkl_thread_ct);
   }
   const uint32_t tile_size = fragments.front().tile_size();
   const uint32_t tile_ct = fragments.front().tile_ct();
@@ -758,9 +993,25 @@ ScoreRunStats ScoreFragments(
       }
       score_seen[task.output_score_idx] = true;
     }
+    const DenseScoringKernel tile_dense_kernel = ResolveDenseScoringKernel(
+        dense_kernel, tile_edge_ct, matrix->column_ct());
     const auto scoring_started = std::chrono::steady_clock::now();
     const ScoreRowWorkStats work = scoring_workers.Dispatch(
-        tasks, variant_states, dense_dosages, sparse_dosages);
+        tasks, variant_states, dense_dosages, sparse_dosages,
+        tile_dense_kernel);
+    if (tile_dense_kernel == DenseScoringKernel::kOneMkl &&
+        work.dense_edge_ct) {
+      const OneMklTileStats onemkl = ApplyOneMklDenseEdges(
+          scoring_workers.dense_edges(), dense_dosages, matrix->column_ct(),
+          matrix);
+      ++stats.onemkl_tile_ct;
+      stats.onemkl_matrix_build_nanoseconds +=
+          onemkl.matrix_build_nanoseconds;
+      stats.onemkl_optimize_nanoseconds += onemkl.optimize_nanoseconds;
+      stats.onemkl_multiply_nanoseconds += onemkl.multiply_nanoseconds;
+    } else if (work.dense_edge_ct) {
+      ++stats.direct_dense_tile_ct;
+    }
     stats.score_major_scoring_nanoseconds += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - scoring_started)
@@ -800,9 +1051,19 @@ ScoreRunStats ScoreFragments(
            {"score_major_rows", stats.score_major_row_ct},
            {"score_major_scoring_nanoseconds",
             stats.score_major_scoring_nanoseconds},
+           {"direct_dense_tiles", stats.direct_dense_tile_ct},
+           {"onemkl_tiles", stats.onemkl_tile_ct},
+           {"onemkl_matrix_build_nanoseconds",
+            stats.onemkl_matrix_build_nanoseconds},
+           {"onemkl_optimize_nanoseconds",
+            stats.onemkl_optimize_nanoseconds},
+           {"onemkl_multiply_nanoseconds",
+            stats.onemkl_multiply_nanoseconds},
            {"maximum_genotype_buffer_bytes",
             stats.maximum_genotype_buffer_bytes},
-           {"imputed_values", stats.imputed_value_ct}});
+           {"imputed_values", stats.imputed_value_ct}},
+          {{"dense_scoring_kernel_requested",
+            DenseScoringKernelName(dense_kernel)}});
     }
     if ((tile_idx + 1) % 100 == 0) {
       std::cerr << "processed " << tile_idx + 1 << "/" << tile_ct
@@ -834,13 +1095,24 @@ ScoreRunStats ScoreFragments(
          {"score_major_rows", stats.score_major_row_ct},
          {"score_major_scoring_nanoseconds",
           stats.score_major_scoring_nanoseconds},
+         {"direct_dense_tiles", stats.direct_dense_tile_ct},
+         {"onemkl_tiles", stats.onemkl_tile_ct},
+         {"onemkl_matrix_build_nanoseconds",
+          stats.onemkl_matrix_build_nanoseconds},
+         {"onemkl_optimize_nanoseconds",
+          stats.onemkl_optimize_nanoseconds},
+         {"onemkl_multiply_nanoseconds",
+          stats.onemkl_multiply_nanoseconds},
          {"copied_sparse_genotype_bytes",
           stats.copied_sparse_genotype_bytes},
          {"maximum_genotype_buffer_bytes",
           stats.maximum_genotype_buffer_bytes},
          {"densified_sparse_variants", stats.densified_sparse_variant_ct},
          {"scoring_threads", thread_ct},
-         {"imputed_values", stats.imputed_value_ct}});
+         {"onemkl_threads", configured_onemkl_thread_ct},
+         {"imputed_values", stats.imputed_value_ct}},
+        {{"dense_scoring_kernel_requested",
+          DenseScoringKernelName(dense_kernel)}});
   }
   return stats;
 }

@@ -9,6 +9,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(PGENSPARSESCORE_USE_ONEMKL
+       "Build the optional oneMKL dense scoring backend" OFF)
+
 set(PLINK_NG_SOURCE_DIR "" CACHE PATH
     "Path to a plink-ng checkout; the pinned repository is fetched when empty")
 set(PGENLIB_SOURCE_DIR "" CACHE PATH
@@ -76,6 +79,12 @@ target_link_libraries(
   pgensparsescore_lib PUBLIC pgen_rans::pgenlib ZLIB::ZLIB ZSTD::ZSTD
                              Threads::Threads
 )
+if(PGENSPARSESCORE_USE_ONEMKL)
+  find_package(MKL CONFIG REQUIRED)
+  target_compile_definitions(pgensparsescore_lib
+                             PUBLIC PGENSPARSESCORE_USE_ONEMKL=1)
+  target_link_libraries(pgensparsescore_lib PUBLIC MKL::MKL)
+endif()
 target_compile_options(pgensparsescore_lib PRIVATE
   $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>
 )
@@ -99,12 +108,17 @@ if(BUILD_TESTING)
     )
   endif()
   if(Python3_Interpreter_FOUND AND PLINK2_EXECUTABLE)
+    set(_integration_kernel_args)
+    if(PGENSPARSESCORE_USE_ONEMKL)
+      list(APPEND _integration_kernel_args --dense-kernel onemkl)
+    endif()
     add_test(
       NAME pgen_integration
       COMMAND "${Python3_EXECUTABLE}"
               "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration_test.py"
               --plink2 "${PLINK2_EXECUTABLE}"
               --scorer "$<TARGET_FILE:pgensparsescore>"
+              ${_integration_kernel_args}
     )
   else()
     message(STATUS "plink2 not found; skipping real-PGEN integration test")

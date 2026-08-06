@@ -75,7 +75,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plink2", required=True)
     parser.add_argument("--scorer", required=True)
+    parser.add_argument("--dense-kernel", choices=("auto", "direct", "onemkl"),
+                        default="auto")
     args = parser.parse_args()
+    dense_kernel_args = ["--dense-kernel", args.dense_kernel]
 
     with tempfile.TemporaryDirectory(prefix="pgensparsescore-integration-") as raw_tmp:
         tmp = pathlib.Path(raw_tmp)
@@ -280,6 +283,7 @@ def main() -> None:
             str(projected_frequency),
             "--missing-freq",
             "omit",
+            *dense_kernel_args,
             "--out",
             str(projected_output),
         )
@@ -304,6 +308,19 @@ def main() -> None:
                 row["SCORE"]: row for row in csv.DictReader(handle, delimiter="\t")
             }
         score1_qc = projected_qc["score1"]
+        projected_metadata = json.loads(
+            projected_output.with_suffix(".json").read_text()
+        )
+        if projected_metadata["dense_scoring_kernel_requested"] != args.dense_kernel:
+            raise AssertionError("selected dense scoring kernel is absent from metadata")
+        expected_kernel_used = "onemkl" if args.dense_kernel == "onemkl" else "direct"
+        if projected_metadata["dense_scoring_kernel_used"] != expected_kernel_used:
+            raise AssertionError("actual dense scoring kernel is absent from metadata")
+        if args.dense_kernel == "onemkl":
+            if projected_metadata["onemkl_threads"] < 1:
+                raise AssertionError("oneMKL thread count is absent from metadata")
+        elif projected_metadata["onemkl_threads"] != 0:
+            raise AssertionError("direct scoring reports active oneMKL threads")
         if (
             score1_qc["CATALOG_WEIGHTS"] != "3"
             or score1_qc["MATCHED_WEIGHTS"] != "2"
