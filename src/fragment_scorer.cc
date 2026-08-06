@@ -102,7 +102,7 @@ struct BlockedDensePlan {
   std::vector<BlockedDenseWeight> weights;
 };
 
-constexpr uint32_t kDenseSampleBlockSize = 256;
+constexpr uint32_t kDenseSampleBlockSize = 1024;
 constexpr uint32_t kBlockedDenseMinimumWeightsPerVariant = 16;
 
 void AddScaledDosages(const double* __restrict__ input, double beta,

@@ -705,11 +705,11 @@ void TestMultiFragmentSingleDecodeScoring() {
       split.second.score_major_maximum_edges_per_tile != 17 ||
       !split.second.score_major_scoring_nanoseconds ||
       split.second.blocked_dense_tile_ct != 1 ||
-      split.second.blocked_dense_sample_block_ct != 157 ||
+      split.second.blocked_dense_sample_block_ct != 40 ||
       split.second.blocked_dense_row_ct != 2 ||
       !split.second.dense_plan_nanoseconds ||
       !split.second.blocked_dense_scoring_nanoseconds ||
-      split.second.blocked_dense_sample_block_size != 256 ||
+      split.second.blocked_dense_sample_block_size != 1024 ||
       split.second.direct_dense_tile_ct != 0 ||
       split.second.blocked_dense_minimum_weights_per_variant != 16 ||
       combined.first != split.first) {
