@@ -14,6 +14,7 @@ struct VariantIndexBuildOptions {
   std::string input_path;
   std::string source_id_column = "SOURCE_ID";
   std::string target_id_column = "TARGET_ID";
+  std::string target_id_prefix_to_strip;
   std::string ref_column = "REF";
   std::string alt_column = "ALT";
   uint32_t block_size = 100000;

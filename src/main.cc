@@ -99,6 +99,7 @@ void PrintUsage(std::ostream& stream) {
       "  pgensparsescore build-variant-index --variant-list FILE \\\n"
       "                          [--source-id-column NAME] \\\n"
       "                          [--target-id-column NAME] \\\n"
+      "                          [--strip-target-id-prefix TEXT] \\\n"
       "                          [--ref-column NAME] [--alt-column NAME] \\\n"
       "                          [--block-size N] [--progress-jsonl FILE] \\\n"
       "                          [--progress-interval-seconds N] \\\n"
@@ -174,6 +175,7 @@ VariantIndexOptions ParseVariantIndexOptions(int argc, char** argv) {
       {"--variant-list", &options.build.input_path},
       {"--source-id-column", &options.build.source_id_column},
       {"--target-id-column", &options.build.target_id_column},
+      {"--strip-target-id-prefix", &options.build.target_id_prefix_to_strip},
       {"--ref-column", &options.build.ref_column},
       {"--alt-column", &options.build.alt_column},
       {"--block-size", &block_size},

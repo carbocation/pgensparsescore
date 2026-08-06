@@ -161,7 +161,8 @@ Columns ReadColumns(LineReader* reader, const VariantIndexBuildOptions& options)
 
 void ValidateFields(const std::vector<std::string>& fields,
                     const Columns& columns, const std::string& path,
-                    uint64_t line_number) {
+                    uint64_t line_number,
+                    const std::string& target_prefix_to_strip) {
   if (fields.size() <= columns.maximum) {
     throw std::runtime_error(path + ": line " + std::to_string(line_number) +
                              " has too few fields");
@@ -175,6 +176,21 @@ void ValidateFields(const std::vector<std::string>& fields,
     throw std::runtime_error(path + ": line " + std::to_string(line_number) +
                              " has an invalid ID or allele pair");
   }
+  if (!target_prefix_to_strip.empty() &&
+      (target.size() <= target_prefix_to_strip.size() ||
+       target.compare(0, target_prefix_to_strip.size(),
+                      target_prefix_to_strip) != 0)) {
+    throw std::runtime_error(path + ": line " + std::to_string(line_number) +
+                             " target ID does not begin with required prefix " +
+                             target_prefix_to_strip);
+  }
+}
+
+std::string_view TargetId(const std::vector<std::string>& fields,
+                          const Columns& columns,
+                          const std::string& prefix_to_strip) {
+  const std::string& value = fields[columns.target];
+  return std::string_view(value).substr(prefix_to_strip.size());
 }
 
 uint64_t ChooseSlotCount(uint64_t alias_ct) {
@@ -317,12 +333,17 @@ void BuildVariantIndex(const VariantIndexBuildOptions& options,
       ++line_number;
       if (line.empty()) continue;
       const auto fields = SplitTabs(line);
-      ValidateFields(fields, columns, options.input_path, line_number);
+      ValidateFields(fields, columns, options.input_path, line_number,
+                     options.target_id_prefix_to_strip);
       if (variant_ct == std::numeric_limits<uint32_t>::max()) {
         throw std::runtime_error("variant index exceeds 32-bit ordinals");
       }
       ++variant_ct;
-      alias_ct += fields[columns.source] == fields[columns.target] ? 1 : 2;
+      alias_ct += fields[columns.source] ==
+                          TargetId(fields, columns,
+                                   options.target_id_prefix_to_strip)
+                      ? 1
+                      : 2;
       allele_byte_ct = CheckedAdd(
           allele_byte_ct,
           CheckedAdd(fields[columns.ref].size(), fields[columns.alt].size(),
@@ -389,12 +410,14 @@ void BuildVariantIndex(const VariantIndexBuildOptions& options,
       ++line_number;
       if (line.empty()) continue;
       const auto fields = SplitTabs(line);
-      ValidateFields(fields, columns, options.input_path, line_number);
+      ValidateFields(fields, columns, options.input_path, line_number,
+                     options.target_id_prefix_to_strip);
       if (built_ct >= variant_ct) {
         throw std::runtime_error("variant list changed between index passes");
       }
       const auto& source = fields[columns.source];
-      const auto& target = fields[columns.target];
+      const std::string_view target = TargetId(
+          fields, columns, options.target_id_prefix_to_strip);
       const auto& ref = fields[columns.ref];
       const auto& alt = fields[columns.alt];
       VariantRecord& record = records[built_ct];

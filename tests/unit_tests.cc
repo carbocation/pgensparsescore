@@ -369,6 +369,28 @@ void TestVariantIndex() {
     }
   }
 
+  const auto prefixed_path = directory / "prefixed.tsv";
+  const auto prefixed_index_path = directory / "prefixed.index.bin";
+  {
+    std::ofstream output(prefixed_path);
+    output << "SOURCE_ID\tTARGET_ID\tREF\tALT\n"
+           << "DRAGEN:chr1:400:G:C\tchr1:400:G:C\tG\tC\n";
+  }
+  options.input_path = prefixed_path.string();
+  options.source_id_column = "SOURCE_ID";
+  options.target_id_column = "TARGET_ID";
+  options.target_id_prefix_to_strip = "chr";
+  options.output_path = prefixed_index_path.string();
+  pgensparsescore::BuildVariantIndex(options);
+  {
+    pgensparsescore::VariantIndex index(prefixed_index_path.string());
+    if (index.Lookup("DRAGEN:chr1:400:G:C") != 0 ||
+        index.Lookup("1:400:G:C") != 0 ||
+        index.Lookup("chr1:400:G:C").has_value()) {
+      throw std::runtime_error("target ID prefix stripping is wrong");
+    }
+  }
+
   const auto duplicate_path = directory / "duplicates.tsv";
   const auto duplicate_index = directory / "duplicates.index.bin";
   {
@@ -380,6 +402,7 @@ void TestVariantIndex() {
   options.input_path = duplicate_path.string();
   options.source_id_column = "SOURCE_ID";
   options.target_id_column = "TARGET_ID";
+  options.target_id_prefix_to_strip.clear();
   options.output_path = duplicate_index.string();
   bool rejected = false;
   try {

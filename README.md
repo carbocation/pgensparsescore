@@ -52,7 +52,9 @@ pgensparsescore build-variant-index \
 
 Other input column names can be named explicitly with
 `--source-id-column`, `--target-id-column`, `--ref-column`, and
-`--alt-column`. The index is a memory-mapped hash table. Building and reading
+`--alt-column`. `--strip-target-id-prefix chr` can, for example, make a
+`chr1:...` target alias match a `1:...` PVAR ID without writing a translated
+copy of the variant list. The index is a memory-mapped hash table. Building and reading
 it does not create a heap-resident set of every variant ID.
 
 Divide the score manifest into groups with similar estimated nonzero-weight
