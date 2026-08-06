@@ -618,6 +618,9 @@ void TestMultiFragmentSingleDecodeScoring() {
            << "source-v1\tG\tA\t0.125\n"
            << "source-v2\tC\tT\t3\n"
            << "source-v2\tC\tT\t0.5\n";
+    for (uint32_t repeat_idx = 0; repeat_idx < 14; ++repeat_idx) {
+      output << "source-v2\tC\tT\t0.01\n";
+    }
   }
   {
     std::ofstream output(weights_b);
@@ -690,23 +693,25 @@ void TestMultiFragmentSingleDecodeScoring() {
   const auto split = score({fragment_a_path.string(), fragment_b_path.string()},
                            directory / "split.matrix.bin", "", 4);
   if (combined.second.variant_ct != variant_ct ||
-      split.second.variant_ct != variant_ct || combined.second.edge_ct != 12 ||
-      split.second.edge_ct != 12 ||
-      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 12 ||
-      split.second.sparse_edge_ct + split.second.dense_edge_ct != 12 ||
+      split.second.variant_ct != variant_ct || combined.second.edge_ct != 26 ||
+      split.second.edge_ct != 26 ||
+      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 26 ||
+      split.second.sparse_edge_ct + split.second.dense_edge_ct != 26 ||
       combined.second.sparse_update_ct + combined.second.dense_update_ct == 0 ||
       split.second.sparse_update_ct + split.second.dense_update_ct == 0 ||
       split.second.score_major_tile_ct != 2 ||
       split.second.score_major_row_ct != 4 ||
       split.second.score_major_maximum_rows_per_tile != 2 ||
-      split.second.score_major_maximum_edges_per_tile != 9 ||
+      split.second.score_major_maximum_edges_per_tile != 17 ||
       !split.second.score_major_scoring_nanoseconds ||
       split.second.blocked_dense_tile_ct != 1 ||
       split.second.blocked_dense_sample_block_ct != 157 ||
       split.second.blocked_dense_row_ct != 2 ||
-      !split.second.blocked_dense_plan_nanoseconds ||
+      !split.second.dense_plan_nanoseconds ||
       !split.second.blocked_dense_scoring_nanoseconds ||
       split.second.blocked_dense_sample_block_size != 256 ||
+      split.second.direct_dense_tile_ct != 0 ||
+      split.second.blocked_dense_minimum_weights_per_variant != 16 ||
       combined.first != split.first) {
     std::cerr << "fragment stats: dense_tiles="
               << split.second.blocked_dense_tile_ct
@@ -730,7 +735,7 @@ void TestMultiFragmentSingleDecodeScoring() {
                                ? 0.75
                                : static_cast<double>((sample_idx + 1) % 3);
     ExpectNear(combined.first[sample_idx],
-               2.875 * dosage0 + 3.5 * (2.0 - dosage1),
+               2.875 * dosage0 + 3.64 * (2.0 - dosage1),
                "multi-fragment score A");
     ExpectNear(combined.first[sample_ct + sample_idx],
                4.0 * (2.0 - dosage0) - dosage1,

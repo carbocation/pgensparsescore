@@ -103,6 +103,7 @@ struct BlockedDensePlan {
 };
 
 constexpr uint32_t kDenseSampleBlockSize = 256;
+constexpr uint32_t kBlockedDenseMinimumWeightsPerVariant = 16;
 
 void AddScaledDosages(const double* __restrict__ input, double beta,
                       uint32_t sample_ct, double* __restrict__ output) {
@@ -347,20 +348,20 @@ BlockedDensePlan BuildBlockedDensePlan(
   return plan;
 }
 
-class BlockedDenseWorkers {
+class DenseWorkers {
  public:
-  BlockedDenseWorkers(uint32_t thread_ct, uint32_t sample_ct)
+  DenseWorkers(uint32_t thread_ct, uint32_t sample_ct)
       : thread_ct_(thread_ct), sample_ct_(sample_ct) {
     if (!thread_ct_ || !sample_ct_) {
-      throw std::runtime_error("invalid blocked-dense worker configuration");
+      throw std::runtime_error("invalid dense worker configuration");
     }
     workers_.reserve(thread_ct_ - 1);
     for (uint32_t worker_idx = 1; worker_idx < thread_ct_; ++worker_idx) {
-      workers_.emplace_back(&BlockedDenseWorkers::WorkerLoop, this);
+      workers_.emplace_back(&DenseWorkers::WorkerLoop, this);
     }
   }
 
-  ~BlockedDenseWorkers() {
+  ~DenseWorkers() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stopping_ = true;
@@ -372,7 +373,7 @@ class BlockedDenseWorkers {
 
   uint32_t Dispatch(const BlockedDensePlan& plan,
                     const std::vector<double>& dense_dosages,
-                    uint32_t dense_variant_ct) {
+                    uint32_t dense_variant_ct, bool blocked) {
     if (plan.weights.empty()) return 0;
     if (!dense_variant_ct ||
         dense_dosages.size() !=
@@ -381,12 +382,16 @@ class BlockedDenseWorkers {
     }
     const uint32_t block_ct =
         (sample_ct_ + kDenseSampleBlockSize - 1) / kDenseSampleBlockSize;
+    const uint32_t work_ct =
+        blocked ? block_ct : static_cast<uint32_t>(plan.rows.size());
     {
       std::lock_guard<std::mutex> lock(mutex_);
       plan_ = &plan;
       dense_dosages_ = &dense_dosages;
       block_ct_ = block_ct;
-      next_block_.store(0);
+      blocked_ = blocked;
+      work_ct_ = work_ct;
+      next_work_.store(0);
       worker_error_ = nullptr;
       pending_worker_ct_ = thread_ct_ - 1;
       ++generation_;
@@ -398,7 +403,7 @@ class BlockedDenseWorkers {
       done_.wait(lock, [&] { return pending_worker_ct_ == 0; });
     }
     if (worker_error_) std::rethrow_exception(worker_error_);
-    return block_ct;
+    return blocked ? block_ct : 0;
   }
 
  private:
@@ -421,17 +426,33 @@ class BlockedDenseWorkers {
     }
   }
 
+  void ApplyRow(uint32_t row_idx) const {
+    const auto& row = plan_->rows[row_idx];
+    for (uint32_t weight_idx = row.weight_begin;
+         weight_idx < row.weight_end; ++weight_idx) {
+      const auto& weight = plan_->weights[weight_idx];
+      const double* input =
+          dense_dosages_->data() +
+          static_cast<uint64_t>(weight.dense_variant_idx) * sample_ct_;
+      AddScaledDosages(input, weight.beta_alt, sample_ct_, row.output);
+    }
+  }
+
   void ApplyAvailable() {
     try {
       for (;;) {
-        const uint32_t block_idx = next_block_.fetch_add(1);
-        if (block_idx >= block_ct_) return;
-        ApplyBlock(block_idx);
+        const uint32_t work_idx = next_work_.fetch_add(1);
+        if (work_idx >= work_ct_) return;
+        if (blocked_) {
+          ApplyBlock(work_idx);
+        } else {
+          ApplyRow(work_idx);
+        }
       }
     } catch (...) {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!worker_error_) worker_error_ = std::current_exception();
-      next_block_.store(UINT32_MAX);
+      next_work_.store(UINT32_MAX);
     }
   }
 
@@ -457,6 +478,7 @@ class BlockedDenseWorkers {
   uint32_t thread_ct_ = 0;
   uint32_t sample_ct_ = 0;
   uint32_t block_ct_ = 0;
+  uint32_t work_ct_ = 0;
   std::vector<std::thread> workers_;
   std::mutex mutex_;
   std::condition_variable start_;
@@ -464,7 +486,8 @@ class BlockedDenseWorkers {
   bool stopping_ = false;
   uint64_t generation_ = 0;
   uint32_t pending_worker_ct_ = 0;
-  std::atomic<uint32_t> next_block_{0};
+  bool blocked_ = false;
+  std::atomic<uint32_t> next_work_{0};
   const BlockedDensePlan* plan_ = nullptr;
   const std::vector<double>* dense_dosages_ = nullptr;
   std::exception_ptr worker_error_;
@@ -795,8 +818,10 @@ ScoreRunStats ScoreFragments(
   std::vector<double> baselines(catalog->scores.size(), 0.0);
   ScoreRowWorkers scoring_workers(thread_ct, matrix->column_ct(), &baselines,
                                   catalog, matrix);
-  BlockedDenseWorkers dense_workers(thread_ct, matrix->column_ct());
+  DenseWorkers dense_workers(thread_ct, matrix->column_ct());
   stats.blocked_dense_sample_block_size = kDenseSampleBlockSize;
+  stats.blocked_dense_minimum_weights_per_variant =
+      kBlockedDenseMinimumWeightsPerVariant;
   uint64_t variant_groups_processed = 0;
   constexpr uint64_t kMaximumCopiedSparseBytes = 512ULL * 1024 * 1024;
 
@@ -966,25 +991,37 @@ ScoreRunStats ScoreFragments(
     if (dense_plan.weights.size() != work.dense_edge_ct) {
       throw std::runtime_error("blocked-dense plan lost score weights");
     }
-    const uint32_t dense_sample_block_ct =
-        dense_workers.Dispatch(dense_plan, dense_dosages, dense_variant_ct);
+    const bool block_dense =
+        dense_variant_ct &&
+        dense_plan.weights.size() >=
+            static_cast<uint64_t>(dense_variant_ct) *
+                kBlockedDenseMinimumWeightsPerVariant;
+    const uint32_t dense_sample_block_ct = dense_workers.Dispatch(
+        dense_plan, dense_dosages, dense_variant_ct, block_dense);
     const auto scoring_finished = std::chrono::steady_clock::now();
     stats.score_major_scoring_nanoseconds += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             scoring_finished - scoring_started)
             .count());
-    stats.blocked_dense_plan_nanoseconds += static_cast<uint64_t>(
+    stats.dense_plan_nanoseconds += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(plan_finished -
                                                              plan_started)
             .count());
-    stats.blocked_dense_scoring_nanoseconds += static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            scoring_finished - plan_finished)
-            .count());
     if (!dense_plan.weights.empty()) {
-      ++stats.blocked_dense_tile_ct;
-      stats.blocked_dense_sample_block_ct += dense_sample_block_ct;
-      stats.blocked_dense_row_ct += dense_plan.rows.size();
+      const uint64_t dense_scoring_nanoseconds = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              scoring_finished - plan_finished)
+              .count());
+      if (block_dense) {
+        ++stats.blocked_dense_tile_ct;
+        stats.blocked_dense_sample_block_ct += dense_sample_block_ct;
+        stats.blocked_dense_row_ct += dense_plan.rows.size();
+        stats.blocked_dense_scoring_nanoseconds += dense_scoring_nanoseconds;
+      } else {
+        ++stats.direct_dense_tile_ct;
+        stats.direct_dense_row_ct += dense_plan.rows.size();
+        stats.direct_dense_scoring_nanoseconds += dense_scoring_nanoseconds;
+      }
     }
     ++stats.score_major_tile_ct;
     stats.score_major_row_ct += work.row_ct;
@@ -1025,10 +1062,13 @@ ScoreRunStats ScoreFragments(
            {"blocked_dense_sample_blocks",
             stats.blocked_dense_sample_block_ct},
            {"blocked_dense_rows", stats.blocked_dense_row_ct},
-           {"blocked_dense_plan_nanoseconds",
-            stats.blocked_dense_plan_nanoseconds},
+           {"dense_plan_nanoseconds", stats.dense_plan_nanoseconds},
            {"blocked_dense_scoring_nanoseconds",
             stats.blocked_dense_scoring_nanoseconds},
+           {"direct_dense_tiles", stats.direct_dense_tile_ct},
+           {"direct_dense_rows", stats.direct_dense_row_ct},
+           {"direct_dense_scoring_nanoseconds",
+            stats.direct_dense_scoring_nanoseconds},
            {"maximum_genotype_buffer_bytes",
             stats.maximum_genotype_buffer_bytes},
            {"imputed_values", stats.imputed_value_ct}});
@@ -1067,12 +1107,17 @@ ScoreRunStats ScoreFragments(
          {"blocked_dense_sample_blocks",
           stats.blocked_dense_sample_block_ct},
          {"blocked_dense_rows", stats.blocked_dense_row_ct},
-         {"blocked_dense_plan_nanoseconds",
-          stats.blocked_dense_plan_nanoseconds},
+         {"dense_plan_nanoseconds", stats.dense_plan_nanoseconds},
          {"blocked_dense_scoring_nanoseconds",
           stats.blocked_dense_scoring_nanoseconds},
          {"blocked_dense_sample_block_size",
           stats.blocked_dense_sample_block_size},
+         {"direct_dense_tiles", stats.direct_dense_tile_ct},
+         {"direct_dense_rows", stats.direct_dense_row_ct},
+         {"direct_dense_scoring_nanoseconds",
+          stats.direct_dense_scoring_nanoseconds},
+         {"blocked_dense_minimum_weights_per_variant",
+          stats.blocked_dense_minimum_weights_per_variant},
          {"copied_sparse_genotype_bytes",
           stats.copied_sparse_genotype_bytes},
          {"maximum_genotype_buffer_bytes",

@@ -74,9 +74,13 @@ struct ScoreRunStats {
   uint64_t blocked_dense_tile_ct = 0;
   uint64_t blocked_dense_sample_block_ct = 0;
   uint64_t blocked_dense_row_ct = 0;
-  uint64_t blocked_dense_plan_nanoseconds = 0;
+  uint64_t dense_plan_nanoseconds = 0;
   uint64_t blocked_dense_scoring_nanoseconds = 0;
   uint64_t blocked_dense_sample_block_size = 0;
+  uint64_t direct_dense_tile_ct = 0;
+  uint64_t direct_dense_row_ct = 0;
+  uint64_t direct_dense_scoring_nanoseconds = 0;
+  uint64_t blocked_dense_minimum_weights_per_variant = 0;
   uint64_t densified_sparse_variant_ct = 0;
   uint64_t copied_sparse_genotype_bytes = 0;
   uint64_t maximum_genotype_buffer_bytes = 0;
