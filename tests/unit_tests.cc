@@ -701,7 +701,25 @@ void TestMultiFragmentSingleDecodeScoring() {
       split.second.score_major_maximum_rows_per_tile != 2 ||
       split.second.score_major_maximum_edges_per_tile != 9 ||
       !split.second.score_major_scoring_nanoseconds ||
+      split.second.blocked_dense_tile_ct != 1 ||
+      split.second.blocked_dense_sample_block_ct != 157 ||
+      split.second.blocked_dense_row_ct != 2 ||
+      !split.second.blocked_dense_plan_nanoseconds ||
+      !split.second.blocked_dense_scoring_nanoseconds ||
+      split.second.blocked_dense_sample_block_size != 256 ||
       combined.first != split.first) {
+    std::cerr << "fragment stats: dense_tiles="
+              << split.second.blocked_dense_tile_ct
+              << " dense_blocks="
+              << split.second.blocked_dense_sample_block_ct
+              << " dense_rows=" << split.second.blocked_dense_row_ct
+              << " score_tiles=" << split.second.score_major_tile_ct
+              << " score_rows=" << split.second.score_major_row_ct
+              << " max_rows="
+              << split.second.score_major_maximum_rows_per_tile
+              << " max_edges="
+              << split.second.score_major_maximum_edges_per_tile
+              << " values_equal=" << (combined.first == split.first) << '\n';
     throw std::runtime_error(
         "splitting score fragments changed scores or genotype decode count");
   }

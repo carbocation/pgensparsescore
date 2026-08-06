@@ -127,13 +127,15 @@ pgensparsescore \
 ```
 
 For each tile, the scorer unions the variant bitmaps from every fragment and
-decodes each needed PGEN variant once. It keeps the tile's dense or sparse
-genotypes in memory, then gives different score rows to different worker
-threads. Each worker reads a score's weights in their stored order and updates
-that score's output row. The number of fragments therefore does not multiply
-genotype reads, and scoring does not need to merge millions of individual
-weight records at runtime. The binary uses all physical cores visible to the
-process by default; `--threads N` overrides that choice.
+decodes each needed PGEN variant once. Sparse variants retain their compact
+carrier lists and update only samples that differ from the common dosage.
+Dense weights are grouped by score in memory and processed in sample blocks;
+each worker owns a different sample block, keeps the corresponding score
+output block hot, and reuses the tile's genotype panel from cache across
+scores. The number of fragments therefore does not multiply genotype reads,
+and scoring does not need to merge millions of individual weight records at
+runtime. The binary uses all physical cores visible to the process by default;
+`--threads N` overrides that choice.
 
 ## Monolithic compiled catalogs
 
@@ -366,7 +368,9 @@ size, and output bytes. Fragment construction reports files and weights read,
 excluded and repeated rows, blocks serialized, and output bytes. Fragment
 scoring reports fragment bytes opened, variant groups merged, and total PGEN
 decodes; the decode count is independent of the fragment count. It also reports
-the resolved thread count and how many score updates used the parallel kernel.
+the resolved thread count, how many score updates used the sparse and dense
+paths, and the time spent planning and applying the blocked dense kernel. Dense
+kernel reports also include the sample-block size and number of blocks.
 
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix
@@ -395,8 +399,8 @@ external frequency and is an error without one.
 When `pgenlib` can return a common dosage plus a short difference list, the
 common contribution is accumulated once per score and only the differing
 samples are updated.  Otherwise, the dense dosage vector is decoded and
-applied.  The score matrix is file-backed, so RAM does not grow as
-`sample_count * score_count`.
+applied with the sample-blocked dense kernel described above. The score matrix
+is file-backed, so RAM does not grow as `sample_count * score_count`.
 
 ## License
 

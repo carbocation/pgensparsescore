@@ -715,6 +715,17 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
                input.score_major_maximum_edges_per_tile);
   output->score_major_scoring_nanoseconds +=
       input.score_major_scoring_nanoseconds;
+  output->blocked_dense_tile_ct += input.blocked_dense_tile_ct;
+  output->blocked_dense_sample_block_ct +=
+      input.blocked_dense_sample_block_ct;
+  output->blocked_dense_row_ct += input.blocked_dense_row_ct;
+  output->blocked_dense_plan_nanoseconds +=
+      input.blocked_dense_plan_nanoseconds;
+  output->blocked_dense_scoring_nanoseconds +=
+      input.blocked_dense_scoring_nanoseconds;
+  output->blocked_dense_sample_block_size =
+      std::max(output->blocked_dense_sample_block_size,
+               input.blocked_dense_sample_block_size);
   output->densified_sparse_variant_ct += input.densified_sparse_variant_ct;
   output->copied_sparse_genotype_bytes += input.copied_sparse_genotype_bytes;
   output->maximum_genotype_buffer_bytes =
@@ -794,7 +805,8 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << ",\n"
            << "  \"scoring_threads\": " << scoring_thread_ct << ",\n"
            << "  \"scoring_layout\": \""
-           << (score_fragment_ct ? "score-major-tiles" : "variant-major")
+           << (score_fragment_ct ? "hybrid-sparse-blocked-dense"
+                                 : "variant-major")
            << "\",\n"
            << "  \"scored_variants\": " << stats.variant_ct << ",\n"
            << "  \"weight_edges\": " << stats.edge_ct << ",\n"
@@ -819,6 +831,18 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << stats.score_major_maximum_edges_per_tile << ",\n"
            << "  \"score_major_scoring_nanoseconds\": "
            << stats.score_major_scoring_nanoseconds << ",\n"
+           << "  \"blocked_dense_tiles\": "
+           << stats.blocked_dense_tile_ct << ",\n"
+           << "  \"blocked_dense_sample_blocks\": "
+           << stats.blocked_dense_sample_block_ct << ",\n"
+           << "  \"blocked_dense_rows\": "
+           << stats.blocked_dense_row_ct << ",\n"
+           << "  \"blocked_dense_plan_nanoseconds\": "
+           << stats.blocked_dense_plan_nanoseconds << ",\n"
+           << "  \"blocked_dense_scoring_nanoseconds\": "
+           << stats.blocked_dense_scoring_nanoseconds << ",\n"
+           << "  \"blocked_dense_sample_block_size\": "
+           << stats.blocked_dense_sample_block_size << ",\n"
            << "  \"densified_sparse_variants\": "
            << stats.densified_sparse_variant_ct << ",\n"
            << "  \"copied_sparse_genotype_bytes\": "
@@ -1014,6 +1038,16 @@ int RunFragmentScoring(
          {"score_major_rows", stats.score_major_row_ct},
          {"score_major_scoring_nanoseconds",
           stats.score_major_scoring_nanoseconds},
+         {"blocked_dense_tiles", stats.blocked_dense_tile_ct},
+         {"blocked_dense_sample_blocks",
+          stats.blocked_dense_sample_block_ct},
+         {"blocked_dense_rows", stats.blocked_dense_row_ct},
+         {"blocked_dense_plan_nanoseconds",
+          stats.blocked_dense_plan_nanoseconds},
+         {"blocked_dense_scoring_nanoseconds",
+          stats.blocked_dense_scoring_nanoseconds},
+         {"blocked_dense_sample_block_size",
+          stats.blocked_dense_sample_block_size},
          {"densified_sparse_variants",
           stats.densified_sparse_variant_ct},
          {"maximum_genotype_buffer_bytes",
