@@ -7,11 +7,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
 #include "io.h"
+#include "progress.h"
 
 namespace pgensparsescore {
 
@@ -214,6 +216,136 @@ FrequencyTable ReadFrequencyTable(
   }
   if (result.empty() && !included_ids) {
     throw std::runtime_error(path + " has no frequency rows");
+  }
+  return result;
+}
+
+IndexedFrequencyTable ReadIndexedFrequencyTable(
+    const std::string& path, const VariantIndex& index,
+    ProgressReporter* progress) {
+  LineReader reader(path);
+  std::string line;
+  if (!reader.GetLine(&line)) {
+    throw std::runtime_error(path + " is empty");
+  }
+  const Header header = MakeHeader(SplitTabs(line), path);
+  const size_t id_idx = Require(header, "ID", path);
+  const size_t ref_idx = Require(header, "REF", path);
+  const size_t alt_idx = Find(header, {"ALT", "ALT1"});
+  if (alt_idx == static_cast<size_t>(-1)) {
+    throw std::runtime_error(path + " is missing frequency column ALT or ALT1");
+  }
+  const size_t mean_idx = Find(header, {"ALT_DOSAGE_MEAN"});
+  const size_t freq_idx = Find(header, {"ALT_FREQS", "ALT1_FREQ"});
+  const size_t alt_count_idx = Find(header, {"ALT_CTS", "ALT1_CT"});
+  const size_t ref_count_idx = Find(header, {"REF_CT"});
+  const size_t obs_idx = Find(header, {"OBS_CT"});
+  if (mean_idx == static_cast<size_t>(-1) &&
+      freq_idx == static_cast<size_t>(-1) &&
+      alt_count_idx == static_cast<size_t>(-1) &&
+      ref_count_idx == static_cast<size_t>(-1)) {
+    throw std::runtime_error(
+        path + " has no ALT_DOSAGE_MEAN, ALT_FREQS, ALT_CTS, or REF_CT column");
+  }
+  if (mean_idx == static_cast<size_t>(-1) &&
+      freq_idx == static_cast<size_t>(-1) &&
+      obs_idx == static_cast<size_t>(-1)) {
+    throw std::runtime_error(path +
+                             " requires OBS_CT when allele counts are used");
+  }
+  const size_t max_idx = std::max(
+      {id_idx, ref_idx, alt_idx,
+       mean_idx == static_cast<size_t>(-1) ? 0 : mean_idx,
+       freq_idx == static_cast<size_t>(-1) ? 0 : freq_idx,
+       alt_count_idx == static_cast<size_t>(-1) ? 0 : alt_count_idx,
+       ref_count_idx == static_cast<size_t>(-1) ? 0 : ref_count_idx,
+       obs_idx == static_cast<size_t>(-1) ? 0 : obs_idx});
+
+  IndexedFrequencyTable result;
+  result.alt_dosage_means.assign(
+      index.variant_ct(), std::numeric_limits<double>::quiet_NaN());
+  uint64_t line_number = 1;
+  while (reader.GetLine(&line)) {
+    ++line_number;
+    if (line.empty()) continue;
+    ++result.input_row_ct;
+    const auto fields = SplitTabs(line);
+    if (fields.size() <= max_idx) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " has too few fields");
+    }
+    const auto ordinal = index.Lookup(fields[id_idx]);
+    if (!ordinal) {
+      if (progress && !(result.input_row_ct % 1000000)) {
+        progress->MaybeEvent("score", "read_frequencies",
+                             {{"frequency_rows_scanned", result.input_row_ct},
+                              {"frequency_rows_matched", result.matched_row_ct}});
+      }
+      continue;
+    }
+    const std::string ref = Upper(fields[ref_idx]);
+    const std::string alt = Upper(fields[alt_idx]);
+    if (ref.empty() || alt.empty() || alt.find(',') != std::string::npos) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " is not biallelic");
+    }
+    if (ref != index.ref(*ordinal) || alt != index.alt(*ordinal)) {
+      throw std::runtime_error(
+          path + ": line " + std::to_string(line_number) +
+          " alleles disagree with the variant index for " + fields[id_idx]);
+    }
+
+    double alt_dosage_mean = 0.0;
+    if (mean_idx != static_cast<size_t>(-1)) {
+      if (IsMissing(fields[mean_idx])) continue;
+      alt_dosage_mean = ParseNumber(fields[mean_idx], path, line_number,
+                                    "ALT_DOSAGE_MEAN");
+    } else if (freq_idx != static_cast<size_t>(-1)) {
+      if (IsMissing(fields[freq_idx])) continue;
+      alt_dosage_mean = 2.0 * ParseBiallelicValue(
+                                    fields[freq_idx], alt, path, line_number,
+                                    "ALT_FREQS");
+    } else {
+      if (IsMissing(fields[obs_idx])) continue;
+      const double observations =
+          ParseNumber(fields[obs_idx], path, line_number, "OBS_CT");
+      if (observations == 0.0) continue;
+      if (observations < 0.0) {
+        throw std::runtime_error(path + ": line " +
+                                 std::to_string(line_number) +
+                                 " has negative OBS_CT");
+      }
+      const double alt_count =
+          alt_count_idx != static_cast<size_t>(-1)
+              ? ParseBiallelicValue(fields[alt_count_idx], alt, path,
+                                    line_number, "ALT_CTS")
+              : observations - ParseNumber(fields[ref_count_idx], path,
+                                            line_number, "REF_CT");
+      alt_dosage_mean = 2.0 * alt_count / observations;
+    }
+    if (alt_dosage_mean < 0.0 || alt_dosage_mean > 2.0) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " has ALT dosage mean outside [0,2]");
+    }
+    if (!std::isnan(result.alt_dosage_means[*ordinal])) {
+      throw std::runtime_error(path + ": duplicate indexed frequency ID " +
+                               fields[id_idx]);
+    }
+    result.alt_dosage_means[*ordinal] = alt_dosage_mean;
+    ++result.matched_row_ct;
+    if (progress && !(result.input_row_ct % 1000000)) {
+      progress->MaybeEvent("score", "read_frequencies",
+                           {{"frequency_rows_scanned", result.input_row_ct},
+                            {"frequency_rows_matched", result.matched_row_ct}});
+    }
+  }
+  if (progress) {
+    progress->Event("score", "frequencies_loaded",
+                    {{"frequency_rows_scanned", result.input_row_ct},
+                     {"frequency_rows_matched", result.matched_row_ct}});
   }
   return result;
 }

@@ -59,12 +59,15 @@ add_library(pgensparsescore_lib
   src/catalog.cc
   src/compiled_catalog.cc
   src/frequency.cc
+  src/fragment_scorer.cc
   src/io.cc
   src/mapped_matrix.cc
   src/pfile.cc
   src/pgen_reader.cc
   src/progress.cc
   src/scorer.cc
+  src/score_fragment.cc
+  src/variant_index.cc
 )
 target_include_directories(pgensparsescore_lib PUBLIC src)
 target_link_libraries(

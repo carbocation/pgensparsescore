@@ -17,12 +17,15 @@
 #include "catalog.h"
 #include "compiled_catalog.h"
 #include "frequency.h"
+#include "fragment_scorer.h"
 #include "io.h"
 #include "mapped_matrix.h"
 #include "pfile.h"
 #include "pgen_reader.h"
 #include "progress.h"
 #include "scorer.h"
+#include "score_fragment.h"
+#include "variant_index.h"
 
 namespace {
 
@@ -33,6 +36,9 @@ struct Options {
   std::string pfile_list;
   std::string manifest;
   std::string compiled_catalog;
+  std::string fragment_list;
+  std::string variant_index;
+  std::string score_schema;
   std::string variant_map;
   std::string read_freq;
   std::string progress_jsonl;
@@ -49,6 +55,18 @@ struct CompileOptions {
   std::string progress_jsonl;
   std::string progress_interval_seconds;
   std::string out;
+};
+
+struct VariantIndexOptions {
+  pgensparsescore::VariantIndexBuildOptions build;
+  std::string progress_jsonl;
+  std::string progress_interval_seconds;
+};
+
+struct FragmentCompileOptions {
+  pgensparsescore::ScoreFragmentCompileOptions build;
+  std::string progress_jsonl;
+  std::string progress_interval_seconds;
 };
 
 class RemoveFileOnExit {
@@ -78,6 +96,18 @@ class RemoveFileOnExit {
 void PrintUsage(std::ostream& stream) {
   stream <<
       "Usage:\n"
+      "  pgensparsescore build-variant-index --variant-list FILE \\\n"
+      "                          [--source-id-column NAME] \\\n"
+      "                          [--target-id-column NAME] \\\n"
+      "                          [--ref-column NAME] [--alt-column NAME] \\\n"
+      "                          [--block-size N] [--progress-jsonl FILE] \\\n"
+      "                          [--progress-interval-seconds N] \\\n"
+      "                          --out VARIANTS.index.bin\n"
+      "  pgensparsescore compile-fragment --manifest FILE \\\n"
+      "                          --variant-index FILE [--temp-dir DIR] \\\n"
+      "                          [--progress-jsonl FILE] \\\n"
+      "                          [--progress-interval-seconds N] \\\n"
+      "                          --out SCORES.fragment.bin\n"
       "  pgensparsescore compile --manifest FILE [--variant-map FILE] \\\n"
       "                          [--progress-jsonl FILE] \\\n"
       "                          [--progress-interval-seconds N] \\\n"
@@ -96,6 +126,26 @@ void PrintUsage(std::ostream& stream) {
       "                     [--progress-jsonl FILE] \\\n"
       "                     [--progress-interval-seconds N] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
+  stream <<
+      "  pgensparsescore (--pgen FILE --pvar FILE --psam FILE | \\\n"
+      "                     --pfile-list FILE) --fragment-list FILE \\\n"
+      "                     --variant-index FILE [--read-freq FILE] \\\n"
+      "                     [--score-schema FILE] \\\n"
+      "                     [--progress-jsonl FILE] \\\n"
+      "                     [--progress-interval-seconds N] \\\n"
+      "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
+}
+
+uint32_t ParsePositiveU32(const std::string& value,
+                          const std::string& argument) {
+  uint32_t result = 0;
+  const auto parsed =
+      std::from_chars(value.data(), value.data() + value.size(), result);
+  if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() ||
+      !result) {
+    throw std::runtime_error(argument + " must be a positive integer");
+  }
+  return result;
 }
 
 uint32_t ParseProgressInterval(const std::string& value) {
@@ -111,6 +161,98 @@ uint32_t ParseProgressInterval(const std::string& value) {
         "--progress-interval-seconds must be a positive integer");
   }
   return result;
+}
+
+VariantIndexOptions ParseVariantIndexOptions(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[2]) == "--help") {
+    PrintUsage(std::cout);
+    std::exit(0);
+  }
+  VariantIndexOptions options;
+  std::string block_size;
+  std::unordered_map<std::string, std::string*> destinations{
+      {"--variant-list", &options.build.input_path},
+      {"--source-id-column", &options.build.source_id_column},
+      {"--target-id-column", &options.build.target_id_column},
+      {"--ref-column", &options.build.ref_column},
+      {"--alt-column", &options.build.alt_column},
+      {"--block-size", &block_size},
+      {"--progress-jsonl", &options.progress_jsonl},
+      {"--progress-interval-seconds", &options.progress_interval_seconds},
+      {"--out", &options.build.output_path},
+  };
+  std::unordered_set<std::string> seen_arguments;
+  for (int idx = 2; idx < argc; ++idx) {
+    const std::string key(argv[idx]);
+    const auto iter = destinations.find(key);
+    if (iter == destinations.end()) {
+      throw std::runtime_error("unknown build-variant-index argument: " + key);
+    }
+    if (++idx >= argc) throw std::runtime_error("missing value after " + key);
+    if (!seen_arguments.insert(key).second) {
+      throw std::runtime_error("argument supplied twice: " + key);
+    }
+    *iter->second = argv[idx];
+  }
+  if (options.build.input_path.empty() || options.build.output_path.empty()) {
+    throw std::runtime_error(
+        "build-variant-index requires --variant-list and --out");
+  }
+  if (!block_size.empty()) {
+    options.build.block_size = ParsePositiveU32(block_size, "--block-size");
+  }
+  if (!options.progress_interval_seconds.empty() &&
+      options.progress_jsonl.empty()) {
+    throw std::runtime_error(
+        "--progress-interval-seconds requires --progress-jsonl");
+  }
+  if (!options.progress_interval_seconds.empty()) {
+    ParseProgressInterval(options.progress_interval_seconds);
+  }
+  return options;
+}
+
+FragmentCompileOptions ParseFragmentCompileOptions(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[2]) == "--help") {
+    PrintUsage(std::cout);
+    std::exit(0);
+  }
+  FragmentCompileOptions options;
+  std::unordered_map<std::string, std::string*> destinations{
+      {"--manifest", &options.build.manifest_path},
+      {"--variant-index", &options.build.variant_index_path},
+      {"--temp-dir", &options.build.temporary_directory},
+      {"--progress-jsonl", &options.progress_jsonl},
+      {"--progress-interval-seconds", &options.progress_interval_seconds},
+      {"--out", &options.build.output_path},
+  };
+  for (int idx = 2; idx < argc; ++idx) {
+    const std::string key(argv[idx]);
+    const auto iter = destinations.find(key);
+    if (iter == destinations.end()) {
+      throw std::runtime_error("unknown compile-fragment argument: " + key);
+    }
+    if (++idx >= argc) throw std::runtime_error("missing value after " + key);
+    if (!iter->second->empty()) {
+      throw std::runtime_error("argument supplied twice: " + key);
+    }
+    *iter->second = argv[idx];
+  }
+  if (options.build.manifest_path.empty() ||
+      options.build.variant_index_path.empty() ||
+      options.build.output_path.empty()) {
+    throw std::runtime_error(
+        "compile-fragment requires --manifest, --variant-index, and --out");
+  }
+  if (!options.progress_interval_seconds.empty() &&
+      options.progress_jsonl.empty()) {
+    throw std::runtime_error(
+        "--progress-interval-seconds requires --progress-jsonl");
+  }
+  if (!options.progress_interval_seconds.empty()) {
+    ParseProgressInterval(options.progress_interval_seconds);
+  }
+  return options;
 }
 
 std::unique_ptr<pgensparsescore::ProgressReporter> MakeProgressReporter(
@@ -208,6 +350,9 @@ Options ParseOptions(int argc, char** argv) {
       {"--pfile-list", &options.pfile_list},
       {"--manifest", &options.manifest},
       {"--compiled-catalog", &options.compiled_catalog},
+      {"--fragment-list", &options.fragment_list},
+      {"--variant-index", &options.variant_index},
+      {"--score-schema", &options.score_schema},
       {"--variant-map", &options.variant_map},
       {"--read-freq", &options.read_freq},
       {"--progress-jsonl", &options.progress_jsonl},
@@ -249,10 +394,26 @@ Options ParseOptions(int argc, char** argv) {
     }
     *iter->second = argv[idx];
   }
-  if (options.out.empty() ||
-      (options.manifest.empty() == options.compiled_catalog.empty())) {
+  const uint32_t score_source_ct = !options.manifest.empty() +
+                                   !options.compiled_catalog.empty() +
+                                   !options.fragment_list.empty();
+  if (options.out.empty() || score_source_ct != 1) {
     throw std::runtime_error(
-        "--out and exactly one of --manifest or --compiled-catalog are required");
+        "--out and exactly one of --manifest, --compiled-catalog, or "
+        "--fragment-list are required");
+  }
+  if (!options.fragment_list.empty() && options.variant_index.empty()) {
+    throw std::runtime_error("--fragment-list requires --variant-index");
+  }
+  if (options.fragment_list.empty() && !options.variant_index.empty()) {
+    throw std::runtime_error("--variant-index requires --fragment-list");
+  }
+  if (options.fragment_list.empty() && !options.score_schema.empty()) {
+    throw std::runtime_error("--score-schema requires --fragment-list");
+  }
+  if (!options.fragment_list.empty() && !options.variant_map.empty()) {
+    throw std::runtime_error(
+        "fragment indexes already contain ID aliases; do not use --variant-map");
   }
   const bool has_single = !options.pgen.empty() || !options.pvar.empty() ||
                           !options.psam.empty();
@@ -438,7 +599,9 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    pgensparsescore::MissingFrequencyPolicy frequency_policy,
                    uint64_t working_matrix_byte_ct,
                    const pgensparsescore::Catalog& catalog,
-                   const pgensparsescore::ScoreRunStats& stats) {
+                   const pgensparsescore::ScoreRunStats& stats,
+                   uint32_t score_fragment_ct = 0,
+                   uint64_t variant_index_variant_ct = 0) {
   {
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
@@ -483,6 +646,9 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
     }
     output << "],\n"
            << "  \"catalog_source\": \"" << catalog_source << "\",\n"
+           << "  \"score_fragments\": " << score_fragment_ct << ",\n"
+           << "  \"variant_index_variants\": "
+           << variant_index_variant_ct << ",\n"
            << "  \"missing_frequency_policy\": \""
            << MissingFrequencyPolicyName(frequency_policy) << "\",\n"
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
@@ -533,6 +699,131 @@ void WriteCompiledCatalogMetadata(
          << "}\n";
 }
 
+int RunFragmentScoring(
+    const Options& options,
+    const std::vector<pgensparsescore::PfileSpec>& inputs,
+    pgensparsescore::ProgressReporter* progress) {
+  pgensparsescore::VariantIndex variant_index(options.variant_index);
+  const auto fragment_paths =
+      pgensparsescore::ReadScoreFragmentList(options.fragment_list);
+  auto loaded = pgensparsescore::LoadScoreFragments(
+      fragment_paths, variant_index, options.score_schema, progress);
+  auto samples = pgensparsescore::ReadPsam(inputs.front().psam);
+  if (progress) {
+    progress->Event("score", "samples_loaded", {{"samples", samples.size()}});
+  }
+
+  std::vector<pgensparsescore::IndexedVariantLocation> locations(
+      variant_index.variant_ct());
+  std::vector<uint32_t> pvar_row_counts;
+  pvar_row_counts.reserve(inputs.size());
+  uint64_t indexed_pvar_variant_ct = 0;
+  for (uint32_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
+    if (input_idx) {
+      const auto input_samples =
+          pgensparsescore::ReadPsam(inputs[input_idx].psam);
+      if (!SamplesEqual(samples, input_samples)) {
+        throw std::runtime_error(
+            "PSAM sample IDs/order differ between PGEN inputs: " +
+            inputs[input_idx].psam);
+      }
+    }
+    const auto pvar = pgensparsescore::AddIndexedPvar(
+        inputs[input_idx].pvar, input_idx, variant_index, &locations, progress);
+    pvar_row_counts.push_back(pvar.row_ct);
+    indexed_pvar_variant_ct += pvar.matched_variant_ct;
+  }
+
+  std::optional<pgensparsescore::IndexedFrequencyTable> frequencies;
+  if (!options.read_freq.empty()) {
+    frequencies = pgensparsescore::ReadIndexedFrequencyTable(
+        options.read_freq, variant_index, progress);
+  }
+
+  std::vector<std::unique_ptr<pgensparsescore::PgenDosageReader>> owned_readers;
+  std::vector<pgensparsescore::PgenDosageReader*> readers;
+  std::vector<std::string> storage_modes;
+  owned_readers.reserve(inputs.size());
+  readers.reserve(inputs.size());
+  storage_modes.reserve(inputs.size());
+  for (uint32_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
+    owned_readers.push_back(
+        std::make_unique<pgensparsescore::PgenDosageReader>(
+            inputs[input_idx].pgen));
+    auto* reader = owned_readers.back().get();
+    if (reader->variant_ct() != pvar_row_counts[input_idx]) {
+      throw std::runtime_error("PGEN/PVAR variant-count mismatch: " +
+                               inputs[input_idx].pgen);
+    }
+    if (reader->sample_ct() != samples.size()) {
+      throw std::runtime_error("PGEN/PSAM sample-count mismatch: " +
+                               inputs[input_idx].pgen);
+    }
+    readers.push_back(reader);
+    storage_modes.emplace_back(reader->storage_mode_name());
+    if (progress) {
+      progress->Event(
+          "score", "pgen_ready",
+          {{"pgen_input_index", input_idx},
+           {"pgen_inputs", inputs.size()},
+           {"pgen_variants", reader->variant_ct()},
+           {"samples", reader->sample_ct()}},
+          {{"pgen", inputs[input_idx].pgen},
+           {"storage_mode", reader->storage_mode_name()}});
+    }
+  }
+
+  const std::string working_path = options.out + ".work.score-major.bin";
+  RemoveFileOnExit remove_working(working_path);
+  uint64_t working_matrix_byte_ct = 0;
+  pgensparsescore::ScoreRunStats stats;
+  {
+    pgensparsescore::MappedMatrix matrix(
+        working_path, loaded.catalog.scores.size(), samples.size());
+    working_matrix_byte_ct = matrix.byte_ct();
+    if (progress) {
+      progress->Event(
+          "score", "working_matrix_ready",
+          {{"working_matrix_bytes", working_matrix_byte_ct},
+           {"sample_rows", samples.size()},
+           {"score_columns", loaded.catalog.scores.size()},
+           {"score_fragments", loaded.fragments.size()},
+           {"fragment_weights", loaded.weight_ct}});
+    }
+    stats = pgensparsescore::ScoreFragments(
+        variant_index, loaded.fragments, loaded.score_maps, locations,
+        frequencies ? &*frequencies : nullptr,
+        options.missing_frequency_policy, readers, &loaded.catalog, &matrix,
+        progress);
+    WriteWideScores(options.out, samples, loaded.catalog, matrix, progress);
+  }
+  remove_working.RemoveNow();
+  WriteMetadata(
+      options.out, samples.size(), samples.front().fid.has_value(),
+      inputs.size(), frequencies ? frequencies->matched_row_ct : 0,
+      variant_index.variant_ct(), indexed_pvar_variant_ct, storage_modes,
+      "fragments", options.missing_frequency_policy, working_matrix_byte_ct,
+      loaded.catalog, stats, loaded.fragments.size(), variant_index.variant_ct());
+  if (progress) {
+    progress->Event(
+        "score", "complete",
+        {{"sample_rows", samples.size()},
+         {"score_columns", loaded.catalog.scores.size()},
+         {"score_fragments", loaded.fragments.size()},
+         {"pgen_inputs", inputs.size()},
+         {"genotype_decodes", stats.variant_ct},
+         {"weight_edges", stats.edge_ct},
+         {"sparse_variants", stats.sparse_variant_ct},
+         {"dense_variants", stats.dense_variant_ct},
+         {"imputed_values", stats.imputed_value_ct}});
+  }
+  std::cerr << "wrote " << loaded.catalog.scores.size()
+            << " named score columns for " << samples.size() << " samples from "
+            << loaded.fragments.size() << " score fragments with "
+            << stats.variant_ct << " total genotype decodes\n";
+  return 0;
+}
+
 int CompileMain(int argc, char** argv) {
   const CompileOptions options = ParseCompileOptions(argc, argv);
   if (std::filesystem::exists(options.out) ||
@@ -580,10 +871,101 @@ int CompileMain(int argc, char** argv) {
   return 0;
 }
 
+int VariantIndexMain(int argc, char** argv) {
+  const VariantIndexOptions options = ParseVariantIndexOptions(argc, argv);
+  if (std::filesystem::exists(options.build.output_path) ||
+      std::filesystem::exists(options.build.output_path + ".json")) {
+    throw std::runtime_error("variant-index output already exists: " +
+                             options.build.output_path);
+  }
+  auto progress = MakeProgressReporter(options.progress_jsonl,
+                                       options.progress_interval_seconds);
+  if (progress) {
+    progress->Event("variant_index", "start", {},
+                    {{"variant_list", options.build.input_path},
+                     {"output", options.build.output_path}});
+  }
+  pgensparsescore::BuildVariantIndex(options.build, progress.get());
+  pgensparsescore::VariantIndex index(options.build.output_path);
+  std::ofstream metadata(options.build.output_path + ".json");
+  if (!metadata) {
+    throw std::runtime_error("cannot write variant-index metadata");
+  }
+  metadata << "{\n"
+           << "  \"format\": \"pgensparsescore-variant-index-v1\",\n"
+           << "  \"path\": \""
+           << pgensparsescore::JsonEscape(
+                  std::filesystem::path(options.build.output_path)
+                      .filename()
+                      .string())
+           << "\",\n"
+           << "  \"variants\": " << index.variant_ct() << ",\n"
+           << "  \"aliases\": " << index.alias_ct() << ",\n"
+           << "  \"block_size\": " << index.block_size() << ",\n"
+           << "  \"blocks\": " << index.block_ct() << ",\n"
+           << "  \"bytes\": "
+           << std::filesystem::file_size(options.build.output_path) << "\n"
+           << "}\n";
+  metadata.close();
+  if (!metadata) throw std::runtime_error("cannot finish variant-index metadata");
+  std::cerr << "built index for " << index.variant_ct() << " variants and "
+            << index.alias_ct() << " IDs in " << index.block_ct()
+            << " blocks\n";
+  return 0;
+}
+
+int FragmentCompileMain(int argc, char** argv) {
+  const FragmentCompileOptions options = ParseFragmentCompileOptions(argc, argv);
+  if (std::filesystem::exists(options.build.output_path) ||
+      std::filesystem::exists(options.build.output_path + ".json")) {
+    throw std::runtime_error("score-fragment output already exists: " +
+                             options.build.output_path);
+  }
+  auto progress = MakeProgressReporter(options.progress_jsonl,
+                                       options.progress_interval_seconds);
+  const auto summary =
+      pgensparsescore::CompileScoreFragment(options.build, progress.get());
+  std::ofstream metadata(options.build.output_path + ".json");
+  if (!metadata) throw std::runtime_error("cannot write fragment metadata");
+  metadata << "{\n"
+           << "  \"format\": \"pgensparsescore-score-fragment-v1\",\n"
+           << "  \"path\": \""
+           << pgensparsescore::JsonEscape(
+                  std::filesystem::path(options.build.output_path)
+                      .filename()
+                      .string())
+           << "\",\n"
+           << "  \"variant_index_variants\": "
+           << summary.variant_index_variant_ct << ",\n"
+           << "  \"block_size\": " << summary.block_size << ",\n"
+           << "  \"blocks\": " << summary.block_ct << ",\n"
+           << "  \"scores\": " << summary.score_ct << ",\n"
+           << "  \"input_weights\": " << summary.input_weight_ct << ",\n"
+           << "  \"weights\": " << summary.weight_ct << ",\n"
+           << "  \"zero_weights\": " << summary.zero_weight_ct << ",\n"
+           << "  \"excluded_weights\": " << summary.excluded_weight_ct
+           << ",\n"
+           << "  \"duplicate_weights\": " << summary.duplicate_weight_ct
+           << ",\n"
+           << "  \"bytes\": " << summary.output_bytes << "\n"
+           << "}\n";
+  metadata.close();
+  if (!metadata) throw std::runtime_error("cannot finish fragment metadata");
+  std::cerr << "built score fragment with " << summary.score_ct
+            << " scores and " << summary.weight_ct << " nonzero weights\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
+    if (argc > 1 && std::string(argv[1]) == "build-variant-index") {
+      return VariantIndexMain(argc, argv);
+    }
+    if (argc > 1 && std::string(argv[1]) == "compile-fragment") {
+      return FragmentCompileMain(argc, argv);
+    }
     if (argc > 1 && std::string(argv[1]) == "compile") {
       return CompileMain(argc, argv);
     }
@@ -605,6 +987,9 @@ int main(int argc, char** argv) {
     if (progress) {
       progress->Event("score", "pfile_inputs_loaded",
                       {{"pgen_inputs", inputs.size()}});
+    }
+    if (!options.fragment_list.empty()) {
+      return RunFragmentScoring(options, inputs, progress.get());
     }
     std::optional<pgensparsescore::CompiledCatalog> compiled_catalog;
     if (!options.compiled_catalog.empty()) {

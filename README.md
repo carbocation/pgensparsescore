@@ -30,13 +30,97 @@ The same command reads ordinary and conditional-rANS PGENs; storage mode is
 detected from the PGEN header. The JSON run metadata records the mode used for
 each input file.
 
-## Reusable compiled catalogs
+## Large score collections
+
+A large collection should be built as one variant index and several score
+fragments. The variant index assigns a stable ordinal to each selected
+pseudobiallelic variant and recognizes both the score-file ID and the cohort
+PVAR ID. This example uses generic column names:
+
+```text
+SOURCE_ID	TARGET_ID	REF	ALT
+score-id-1	pvar-id-1	A	G
+score-id-2	pvar-id-2	C	T
+```
+
+```sh
+pgensparsescore build-variant-index \
+  --variant-list selected-variants.tsv.gz \
+  --block-size 100000 \
+  --out selected.index.bin
+```
+
+Other input column names can be named explicitly with
+`--source-id-column`, `--target-id-column`, `--ref-column`, and
+`--alt-column`. The index is a memory-mapped hash table. Building and reading
+it does not create a heap-resident set of every variant ID.
+
+Divide the score manifest into groups with similar estimated nonzero-weight
+counts. Each group is compiled independently and can run on a different
+machine:
+
+```sh
+pgensparsescore compile-fragment \
+  --manifest fragment_00000.tsv \
+  --variant-index selected.index.bin \
+  --temp-dir work/fragment_00000 \
+  --out fragment_00000.bin
+```
+
+A fragment manifest uses the usual `SCORE_ID`, `COLUMN_NAME`, and `PATH`
+columns. `SCORE_ID` is the durable identity. Weights store fragment-local
+score indices, so an existing fragment remains usable if a later release
+adds scores or changes the output column order. The compiler streams weight
+rows into variant blocks and sorts one block at a time; it does not retain the
+whole fragment in memory.
+
+The fragment list contains one path per compiled fragment:
+
+```text
+FRAGMENT
+fragments/fragment_00000.bin
+fragments/fragment_00001.bin
+```
+
+The optional score schema fixes the requested row order and column names:
+
+```text
+SCORE_ID	COLUMN_NAME
+source:score_a	source__score_a
+source:score_b	source__score_b
+```
+
+Score all fragments together:
+
+```sh
+pgensparsescore \
+  --pfile-list cohort.pfiles.tsv \
+  --variant-index selected.index.bin \
+  --fragment-list fragments.tsv \
+  --score-schema score_schema.tsv \
+  --read-freq reference.acount.zst \
+  --missing-freq omit \
+  --out results/cohort
+```
+
+The scorer opens every fragment and merges the current variant block from
+each one. A PGEN variant is decoded once and its dosage is applied to all
+matching weights, regardless of the number of fragments. Memory is bounded by
+the index, the current variant's edges, cohort-location and frequency arrays,
+and the file-backed score matrix. Fragmentation therefore shortens and
+parallelizes the build without multiplying genotype reads.
+
+## Monolithic compiled catalogs
 
 The manifest form is convenient for small runs, but it requires every score
 file to be parsed each time a cohort is scored. A compiled catalog performs
 that parsing once and stores the nonzero weights grouped by source variant.
 It is independent of a particular PGEN and can be reused for 1KG+HGDP, AoU,
 UKB, and other cohorts.
+
+This format is retained for smaller collections and compatibility. The
+variant-index and fragment format above is the intended path when all weights
+cannot be built comfortably in one process.
 
 ```sh
 pgensparsescore compile \
@@ -251,6 +335,12 @@ reports catalog loading and matching, PVAR and frequency loading, sparse and
 dense decodes, weight edges, imputed values, and output rows. Phase-boundary
 events are always written; long phases also write events at the requested
 interval.
+
+Variant-index construction reports both passes through the list, hash-table
+size, and output bytes. Fragment construction reports files and weights read,
+excluded and repeated rows, blocks serialized, and output bytes. Fragment
+scoring reports fragment bytes opened, variant groups merged, and total PGEN
+decodes; the decode count is independent of the fragment count.
 
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix
