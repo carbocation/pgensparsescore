@@ -24,14 +24,14 @@ void ApplyDenseDosageRange(const double* dosages, uint32_t sample_ct,
   }
 }
 
-void ApplyDenseDosagePartition(const double* dosages, uint32_t sample_ct,
-                               const std::vector<Edge>& edges,
-                               uint32_t partition_idx,
-                               uint32_t partition_ct, MappedMatrix* matrix) {
+void ApplyDenseDosageSampleRange(const double* dosages,
+                                 uint32_t sample_begin, uint32_t sample_end,
+                                 const std::vector<Edge>& edges,
+                                 MappedMatrix* matrix) {
   for (const Edge& edge : edges) {
-    if (edge.score_idx % partition_ct != partition_idx) continue;
     double* row = matrix->Row(edge.score_idx);
-    for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
+    for (uint32_t sample_idx = sample_begin; sample_idx < sample_end;
+         ++sample_idx) {
       row[sample_idx] += edge.beta_alt * dosages[sample_idx];
     }
   }
@@ -67,19 +67,22 @@ void ApplySparseDosageRange(double common, double mean,
   }
 }
 
-void ApplySparseDosagePartition(double common, double mean,
-                                const uint32_t* sample_ids,
-                                const uint16_t* dosage16, uint32_t value_ct,
-                                const std::vector<Edge>& edges,
-                                uint32_t partition_idx,
-                                uint32_t partition_ct,
-                                std::vector<double>* baselines,
-                                MappedMatrix* matrix) {
+void AddSparseDosageBaselines(double common, const std::vector<Edge>& edges,
+                              std::vector<double>* baselines) {
   for (const Edge& edge : edges) {
-    if (edge.score_idx % partition_ct != partition_idx) continue;
     (*baselines)[edge.score_idx] += edge.beta_alt * common;
+  }
+}
+
+void ApplySparseDosageValueRange(double common, double mean,
+                                 const uint32_t* sample_ids,
+                                 const uint16_t* dosage16,
+                                 uint32_t value_begin, uint32_t value_end,
+                                 const std::vector<Edge>& edges,
+                                 MappedMatrix* matrix) {
+  for (const Edge& edge : edges) {
     double* row = matrix->Row(edge.score_idx);
-    for (uint32_t value_idx = 0; value_idx < value_ct; ++value_idx) {
+    for (uint32_t value_idx = value_begin; value_idx < value_end; ++value_idx) {
       const double dosage = dosage16[value_idx] == UINT16_MAX
                                 ? mean
                                 : static_cast<double>(dosage16[value_idx]) /

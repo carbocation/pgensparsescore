@@ -84,7 +84,7 @@ class ScoringWorkers {
                   const std::vector<Edge>& edges) {
     const uint64_t update_ct =
         static_cast<uint64_t>(sample_ct) * edges.size();
-    if (!ShouldParallelize(edges.size(), update_ct)) {
+    if (!ShouldParallelize(sample_ct, update_ct)) {
       ApplyDenseDosage(dosages, sample_ct, edges, matrix_);
       return false;
     }
@@ -98,11 +98,12 @@ class ScoringWorkers {
                    const std::vector<Edge>& edges) {
     const uint64_t update_ct =
         static_cast<uint64_t>(value_ct) * edges.size();
-    if (!ShouldParallelize(edges.size(), update_ct)) {
+    if (!ShouldParallelize(value_ct, update_ct)) {
       ApplySparseDosage(common, mean, sample_ids, dosage16, value_ct, edges,
                         baselines_, matrix_);
       return false;
     }
+    AddSparseDosageBaselines(common, edges, baselines_);
     Dispatch(TaskType::kSparse, nullptr, 0, common, mean, sample_ids, dosage16,
              value_ct, edges);
     return true;
@@ -110,10 +111,10 @@ class ScoringWorkers {
 
  private:
   enum class TaskType { kDense, kSparse };
-  static constexpr uint64_t kMinimumParallelUpdates = 65536;
+  static constexpr uint64_t kMinimumParallelUpdates = 32768;
 
-  bool ShouldParallelize(size_t edge_ct, uint64_t update_ct) const {
-    return thread_ct_ > 1 && edge_ct > 1 &&
+  bool ShouldParallelize(uint32_t item_ct, uint64_t update_ct) const {
+    return thread_ct_ > 1 && item_ct > 1 &&
            update_ct >= kMinimumParallelUpdates;
   }
 
@@ -121,8 +122,8 @@ class ScoringWorkers {
                 double common, double mean, const uint32_t* sample_ids,
                 const uint16_t* dosage16, uint32_t value_ct,
                 const std::vector<Edge>& edges) {
-    const uint32_t active_thread_ct =
-        std::min<uint32_t>(thread_ct_, edges.size());
+    const uint32_t item_ct = type == TaskType::kDense ? sample_ct : value_ct;
+    const uint32_t active_thread_ct = std::min(thread_ct_, item_ct);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       type_ = type;
@@ -145,15 +146,24 @@ class ScoringWorkers {
   }
 
   void ApplyPartition(uint32_t worker_idx, uint32_t active_thread_ct) {
-    // A fragment may retain repeated rows for the same score and variant.
-    // Score-based ownership keeps all such writes on one worker.
     if (type_ == TaskType::kDense) {
-      ApplyDenseDosagePartition(dense_values_, sample_ct_, *edges_, worker_idx,
-                                active_thread_ct, matrix_);
+      const uint32_t sample_begin =
+          static_cast<uint64_t>(sample_ct_) * worker_idx / active_thread_ct;
+      const uint32_t sample_end =
+          static_cast<uint64_t>(sample_ct_) * (worker_idx + 1) /
+          active_thread_ct;
+      ApplyDenseDosageSampleRange(dense_values_, sample_begin, sample_end,
+                                  *edges_, matrix_);
     } else {
-      ApplySparseDosagePartition(common_, mean_, sample_ids_, dosage16_,
-                                 value_ct_, *edges_, worker_idx,
-                                 active_thread_ct, baselines_, matrix_);
+      const uint32_t value_begin =
+          static_cast<uint64_t>(value_ct_) * worker_idx / active_thread_ct;
+      const uint32_t value_end =
+          static_cast<uint64_t>(value_ct_) * (worker_idx + 1) /
+          active_thread_ct;
+      // Sparse sample IDs are unique. Assigning each value to one worker keeps
+      // repeated score edges ordered while avoiding concurrent cell writes.
+      ApplySparseDosageValueRange(common_, mean_, sample_ids_, dosage16_,
+                                  value_begin, value_end, *edges_, matrix_);
     }
   }
 

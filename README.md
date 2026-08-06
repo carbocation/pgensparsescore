@@ -111,9 +111,9 @@ matching weights, regardless of the number of fragments. Memory is bounded by
 the index, the current variant's edges, cohort-location and frequency arrays,
 and the file-backed score matrix. Fragmentation therefore shortens and
 parallelizes the build without multiplying genotype reads. During scoring,
-the binary divides independent score-row updates among a persistent worker
-pool using all physical cores visible to the process. `--threads N` overrides
-that default. Additional threads do not read the same genotype again.
+the binary divides each dosage's samples among a persistent worker pool using
+all physical cores visible to the process. `--threads N` overrides that
+default. Additional threads do not read the same genotype again.
 
 ## Monolithic compiled catalogs
 

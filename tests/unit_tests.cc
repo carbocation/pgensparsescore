@@ -507,7 +507,9 @@ void TestMultiFragmentSingleDecodeScoring() {
   std::filesystem::create_directories(directory);
   const auto pgen_path = directory / "fixture.pgen";
   std::vector<uint64_t> sparse(pgen_rans::PackedWordCt(sample_ct), 0);
-  pgen_rans::SetPackedGenotype(sparse.data(), 3, 1);
+  for (uint32_t sample_idx = 0; sample_idx < 4096; ++sample_idx) {
+    pgen_rans::SetPackedGenotype(sparse.data(), sample_idx, 1);
+  }
   pgen_rans::SetPackedGenotype(sparse.data(), 17, 3);
   std::vector<uint64_t> dense(pgen_rans::PackedWordCt(sample_ct), 0);
   for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
@@ -559,6 +561,13 @@ void TestMultiFragmentSingleDecodeScoring() {
     std::ofstream output(weights_a);
     output << "SNP\tEFFECT_ALLELE\tOTHER_ALLELE\tEFFECT_ALLELE_WEIGHT\n"
            << "source-v1\tG\tA\t2\n"
+           << "source-v1\tG\tA\t0.125\n"
+           << "source-v1\tG\tA\t0.125\n"
+           << "source-v1\tG\tA\t0.125\n"
+           << "source-v1\tG\tA\t0.125\n"
+           << "source-v1\tG\tA\t0.125\n"
+           << "source-v1\tG\tA\t0.125\n"
+           << "source-v1\tG\tA\t0.125\n"
            << "source-v2\tC\tT\t3\n"
            << "source-v2\tC\tT\t0.5\n";
   }
@@ -633,26 +642,25 @@ void TestMultiFragmentSingleDecodeScoring() {
   const auto split = score({fragment_a_path.string(), fragment_b_path.string()},
                            directory / "split.matrix.bin", "", 4);
   if (combined.second.variant_ct != variant_ct ||
-      split.second.variant_ct != variant_ct || combined.second.edge_ct != 5 ||
-      split.second.edge_ct != 5 ||
-      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 5 ||
-      split.second.sparse_edge_ct + split.second.dense_edge_ct != 5 ||
+      split.second.variant_ct != variant_ct || combined.second.edge_ct != 12 ||
+      split.second.edge_ct != 12 ||
+      combined.second.sparse_edge_ct + combined.second.dense_edge_ct != 12 ||
+      split.second.sparse_edge_ct + split.second.dense_edge_ct != 12 ||
       combined.second.sparse_update_ct + combined.second.dense_update_ct == 0 ||
       split.second.sparse_update_ct + split.second.dense_update_ct == 0 ||
-      split.second.parallel_variant_ct != 1 ||
+      split.second.parallel_variant_ct != 2 ||
       combined.first != split.first) {
     throw std::runtime_error(
         "splitting score fragments changed scores or genotype decode count");
   }
   for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
-    double dosage0 = 0.0;
-    if (sample_idx == 3) dosage0 = 1.0;
+    double dosage0 = sample_idx < 4096 ? 1.0 : 0.0;
     if (sample_idx == 17) dosage0 = 0.25;
     const double dosage1 = sample_idx == 16
                                ? 0.75
                                : static_cast<double>((sample_idx + 1) % 3);
     ExpectNear(combined.first[sample_idx],
-               2.0 * dosage0 + 3.5 * (2.0 - dosage1),
+               2.875 * dosage0 + 3.5 * (2.0 - dosage1),
                "multi-fragment score A");
     ExpectNear(combined.first[sample_ct + sample_idx],
                4.0 * (2.0 - dosage0) - dosage1,
