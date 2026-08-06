@@ -16,6 +16,8 @@
 
 namespace pgensparsescore {
 
+enum class DenseScoringKernel { kScalar, kBlocked };
+
 std::vector<std::string> ReadScoreFragmentList(const std::string& path);
 
 struct IndexedVariantLocation {
@@ -59,6 +61,7 @@ ScoreRunStats ScoreFragments(
     MissingFrequencyPolicy missing_frequency_policy,
     const std::vector<PgenDosageReader*>& readers, Catalog* catalog,
     MappedMatrix* matrix, uint32_t thread_ct = 1,
+    DenseScoringKernel dense_scoring_kernel = DenseScoringKernel::kBlocked,
     ProgressReporter* progress = nullptr);
 
 }  // namespace pgensparsescore

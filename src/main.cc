@@ -52,6 +52,7 @@ struct Options {
   std::string progress_jsonl;
   std::string progress_interval_seconds;
   std::string threads;
+  std::string scoring_kernel;
   std::string out;
   pgensparsescore::MissingFrequencyPolicy missing_frequency_policy =
       pgensparsescore::MissingFrequencyPolicy::kCohort;
@@ -144,6 +145,7 @@ void PrintUsage(std::ostream& stream) {
       "                     [--progress-jsonl FILE] \\\n"
       "                     [--progress-interval-seconds N] \\\n"
       "                     [--threads N] \\\n"
+      "                     [--scoring-kernel blocked|scalar] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
 }
 
@@ -403,6 +405,7 @@ Options ParseOptions(int argc, char** argv) {
       {"--progress-jsonl", &options.progress_jsonl},
       {"--progress-interval-seconds", &options.progress_interval_seconds},
       {"--threads", &options.threads},
+      {"--scoring-kernel", &options.scoring_kernel},
       {"--out", &options.out},
   };
   for (int idx = 1; idx < argc; ++idx) {
@@ -460,6 +463,9 @@ Options ParseOptions(int argc, char** argv) {
   if (options.fragment_list.empty() && !options.threads.empty()) {
     throw std::runtime_error("--threads requires --fragment-list");
   }
+  if (options.fragment_list.empty() && !options.scoring_kernel.empty()) {
+    throw std::runtime_error("--scoring-kernel requires --fragment-list");
+  }
   if (!options.fragment_list.empty() && !options.variant_map.empty()) {
     throw std::runtime_error(
         "fragment indexes already contain ID aliases; do not use --variant-map");
@@ -491,6 +497,12 @@ Options ParseOptions(int argc, char** argv) {
   }
   if (!options.threads.empty()) {
     ParsePositiveU32(options.threads, "--threads");
+  }
+  if (options.scoring_kernel.empty()) options.scoring_kernel = "blocked";
+  if (options.scoring_kernel != "blocked" &&
+      options.scoring_kernel != "scalar") {
+    throw std::runtime_error(
+        "--scoring-kernel must be blocked or scalar");
   }
   return options;
 }
@@ -641,6 +653,17 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
   output->dense_update_ct += input.dense_update_ct;
   output->parallel_variant_ct += input.parallel_variant_ct;
   output->parallel_update_ct += input.parallel_update_ct;
+  output->blocked_dense_block_ct += input.blocked_dense_block_ct;
+  output->blocked_dense_variant_ct += input.blocked_dense_variant_ct;
+  output->blocked_dense_edge_ct += input.blocked_dense_edge_ct;
+  output->blocked_dense_maximum_variant_ct =
+      std::max(output->blocked_dense_maximum_variant_ct,
+               input.blocked_dense_maximum_variant_ct);
+  output->blocked_dense_maximum_edge_ct =
+      std::max(output->blocked_dense_maximum_edge_ct,
+               input.blocked_dense_maximum_edge_ct);
+  output->blocked_dense_scoring_nanoseconds +=
+      input.blocked_dense_scoring_nanoseconds;
   output->imputed_value_ct += input.imputed_value_ct;
   output->external_frequency_variant_ct += input.external_frequency_variant_ct;
   output->cohort_frequency_variant_ct += input.cohort_frequency_variant_ct;
@@ -661,7 +684,8 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    const pgensparsescore::ScoreRunStats& stats,
                    uint32_t score_fragment_ct = 0,
                    uint64_t variant_index_variant_ct = 0,
-                   uint32_t scoring_thread_ct = 1) {
+                   uint32_t scoring_thread_ct = 1,
+                   const std::string& scoring_kernel = "scalar") {
   {
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
@@ -714,6 +738,7 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
            << ",\n"
            << "  \"scoring_threads\": " << scoring_thread_ct << ",\n"
+           << "  \"scoring_kernel\": \"" << scoring_kernel << "\",\n"
            << "  \"scored_variants\": " << stats.variant_ct << ",\n"
            << "  \"weight_edges\": " << stats.edge_ct << ",\n"
            << "  \"sparse_variants\": " << stats.sparse_variant_ct << ",\n"
@@ -727,6 +752,18 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << ",\n"
            << "  \"parallel_score_updates\": " << stats.parallel_update_ct
            << ",\n"
+           << "  \"blocked_dense_blocks\": "
+           << stats.blocked_dense_block_ct << ",\n"
+           << "  \"blocked_dense_variants\": "
+           << stats.blocked_dense_variant_ct << ",\n"
+           << "  \"blocked_dense_weight_edges\": "
+           << stats.blocked_dense_edge_ct << ",\n"
+           << "  \"blocked_dense_maximum_variants_per_block\": "
+           << stats.blocked_dense_maximum_variant_ct << ",\n"
+           << "  \"blocked_dense_maximum_edges_per_block\": "
+           << stats.blocked_dense_maximum_edge_ct << ",\n"
+           << "  \"blocked_dense_scoring_nanoseconds\": "
+           << stats.blocked_dense_scoring_nanoseconds << ",\n"
            << "  \"imputed_values\": " << stats.imputed_value_ct << ",\n"
            << "  \"external_frequency_variants\": "
            << stats.external_frequency_variant_ct << ",\n"
@@ -850,6 +887,10 @@ int RunFragmentScoring(
                                          ? PhysicalCoreCount()
                                          : ParsePositiveU32(options.threads,
                                                             "--threads");
+  const auto dense_scoring_kernel =
+      options.scoring_kernel == "blocked"
+          ? pgensparsescore::DenseScoringKernel::kBlocked
+          : pgensparsescore::DenseScoringKernel::kScalar;
   pgensparsescore::ScoreRunStats stats;
   {
     pgensparsescore::MappedMatrix matrix(
@@ -863,13 +904,14 @@ int RunFragmentScoring(
            {"score_columns", loaded.catalog.scores.size()},
            {"score_fragments", loaded.fragments.size()},
            {"fragment_weights", loaded.weight_ct},
-           {"scoring_threads", scoring_thread_ct}});
+           {"scoring_threads", scoring_thread_ct}},
+          {{"scoring_kernel", options.scoring_kernel}});
     }
     stats = pgensparsescore::ScoreFragments(
         variant_index, loaded.fragments, loaded.score_maps, locations,
         frequencies ? &*frequencies : nullptr,
         options.missing_frequency_policy, readers, &loaded.catalog, &matrix,
-        scoring_thread_ct, progress);
+        scoring_thread_ct, dense_scoring_kernel, progress);
     WriteWideScores(options.out, samples, loaded.catalog, matrix, progress);
   }
   remove_working.RemoveNow();
@@ -879,7 +921,7 @@ int RunFragmentScoring(
       variant_index.variant_ct(), indexed_pvar_variant_ct, storage_modes,
       "fragments", options.missing_frequency_policy, working_matrix_byte_ct,
       loaded.catalog, stats, loaded.fragments.size(), variant_index.variant_ct(),
-      scoring_thread_ct);
+      scoring_thread_ct, options.scoring_kernel);
   if (progress) {
     progress->Event(
         "score", "complete",
@@ -897,8 +939,14 @@ int RunFragmentScoring(
          {"dense_score_updates", stats.dense_update_ct},
          {"parallel_variants", stats.parallel_variant_ct},
          {"parallel_score_updates", stats.parallel_update_ct},
+         {"blocked_dense_blocks", stats.blocked_dense_block_ct},
+         {"blocked_dense_variants", stats.blocked_dense_variant_ct},
+         {"blocked_dense_weight_edges", stats.blocked_dense_edge_ct},
+         {"blocked_dense_scoring_nanoseconds",
+          stats.blocked_dense_scoring_nanoseconds},
          {"scoring_threads", scoring_thread_ct},
-         {"imputed_values", stats.imputed_value_ct}});
+         {"imputed_values", stats.imputed_value_ct}},
+        {{"scoring_kernel", options.scoring_kernel}});
   }
   std::cerr << "wrote " << loaded.catalog.scores.size()
             << " named score columns for " << samples.size() << " samples from "

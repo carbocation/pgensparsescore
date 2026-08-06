@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "blocked_dense_scorer.h"
 #include "io.h"
 #include "scorer.h"
 
@@ -499,7 +500,8 @@ ScoreRunStats ScoreFragments(
     const IndexedFrequencyTable* frequencies,
     MissingFrequencyPolicy missing_frequency_policy,
     const std::vector<PgenDosageReader*>& readers, Catalog* catalog,
-    MappedMatrix* matrix, uint32_t thread_ct, ProgressReporter* progress) {
+    MappedMatrix* matrix, uint32_t thread_ct,
+    DenseScoringKernel dense_scoring_kernel, ProgressReporter* progress) {
   if (locations.size() != index.variant_ct() || fragments.empty() ||
       score_maps.size() != fragments.size() ||
       readers.empty() || matrix->row_ct() != catalog->scores.size() ||
@@ -522,6 +524,8 @@ ScoreRunStats ScoreFragments(
   ScoreRunStats stats;
   std::vector<double> baselines(catalog->scores.size(), 0.0);
   ScoringWorkers scoring_workers(thread_ct, &baselines, matrix);
+  BlockedDenseScorer blocked_dense_scorer(
+      thread_ct, catalog->scores.size(), matrix->column_ct(), matrix);
   std::vector<Edge> combined_edges;
   uint64_t variant_groups_processed = 0;
 
@@ -652,12 +656,16 @@ ScoreRunStats ScoreFragments(
         stats.dense_edge_ct += combined_edges.size();
         stats.dense_update_ct +=
             static_cast<uint64_t>(combined_edges.size()) * reader->sample_ct();
-        if (scoring_workers.ApplyDense(dosage.dense_values,
-                                       reader->sample_ct(), combined_edges)) {
+        if (dense_scoring_kernel == DenseScoringKernel::kBlocked) {
+          blocked_dense_scorer.Add(dosage.dense_values, combined_edges);
+          ++stats.blocked_dense_variant_ct;
+          stats.blocked_dense_edge_ct += combined_edges.size();
+        } else if (scoring_workers.ApplyDense(
+                       dosage.dense_values, reader->sample_ct(),
+                       combined_edges)) {
           ++stats.parallel_variant_ct;
-          stats.parallel_update_ct +=
-              static_cast<uint64_t>(combined_edges.size()) *
-              reader->sample_ct();
+          stats.parallel_update_ct += static_cast<uint64_t>(
+              combined_edges.size()) * reader->sample_ct();
         }
       }
       if (progress && !(stats.variant_ct % 10000)) {
@@ -676,6 +684,9 @@ ScoreRunStats ScoreFragments(
              {"dense_score_updates", stats.dense_update_ct},
              {"parallel_variants", stats.parallel_variant_ct},
              {"parallel_score_updates", stats.parallel_update_ct},
+             {"blocked_dense_variants", stats.blocked_dense_variant_ct},
+             {"blocked_dense_weight_edges", stats.blocked_dense_edge_ct},
+             {"blocked_dense_blocks", blocked_dense_scorer.stats().block_ct},
              {"imputed_values", stats.imputed_value_ct}});
       }
       if (!(stats.variant_ct % 100000)) {
@@ -700,9 +711,20 @@ ScoreRunStats ScoreFragments(
            {"dense_score_updates", stats.dense_update_ct},
            {"parallel_variants", stats.parallel_variant_ct},
            {"parallel_score_updates", stats.parallel_update_ct},
+           {"blocked_dense_variants", stats.blocked_dense_variant_ct},
+           {"blocked_dense_weight_edges", stats.blocked_dense_edge_ct},
+           {"blocked_dense_blocks", blocked_dense_scorer.stats().block_ct},
            {"imputed_values", stats.imputed_value_ct}});
     }
   }
+  blocked_dense_scorer.Flush();
+  stats.blocked_dense_block_ct = blocked_dense_scorer.stats().block_ct;
+  stats.blocked_dense_maximum_variant_ct =
+      blocked_dense_scorer.stats().maximum_variant_ct;
+  stats.blocked_dense_maximum_edge_ct =
+      blocked_dense_scorer.stats().maximum_edge_ct;
+  stats.blocked_dense_scoring_nanoseconds =
+      blocked_dense_scorer.stats().scoring_nanoseconds;
   for (uint32_t score_idx = 0; score_idx < catalog->scores.size(); ++score_idx) {
     double* row = matrix->Row(score_idx);
     const double baseline = baselines[score_idx];
@@ -727,6 +749,15 @@ ScoreRunStats ScoreFragments(
          {"dense_score_updates", stats.dense_update_ct},
          {"parallel_variants", stats.parallel_variant_ct},
          {"parallel_score_updates", stats.parallel_update_ct},
+         {"blocked_dense_blocks", stats.blocked_dense_block_ct},
+         {"blocked_dense_variants", stats.blocked_dense_variant_ct},
+         {"blocked_dense_weight_edges", stats.blocked_dense_edge_ct},
+         {"blocked_dense_maximum_variants_per_block",
+          stats.blocked_dense_maximum_variant_ct},
+         {"blocked_dense_maximum_edges_per_block",
+          stats.blocked_dense_maximum_edge_ct},
+         {"blocked_dense_scoring_nanoseconds",
+          stats.blocked_dense_scoring_nanoseconds},
          {"scoring_threads", thread_ct},
          {"imputed_values", stats.imputed_value_ct}});
   }

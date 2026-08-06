@@ -10,6 +10,7 @@
 #include <vector>
 #include <zstd.h>
 
+#include "blocked_dense_scorer.h"
 #include "catalog.h"
 #include "compiled_catalog.h"
 #include "frequency.h"
@@ -71,6 +72,54 @@ void TestSparseKernel() {
     }
   }
   std::filesystem::remove(path);
+}
+
+void TestBlockedDenseKernel() {
+  constexpr uint32_t sample_ct = 257;
+  constexpr uint32_t score_ct = 3;
+  const auto scalar_path = TempPath("-blocked-scalar.bin");
+  const auto blocked_path = TempPath("-blocked-matrix.bin");
+  std::vector<std::vector<double>> dosages(3,
+                                           std::vector<double>(sample_ct));
+  for (uint32_t variant_idx = 0; variant_idx < dosages.size(); ++variant_idx) {
+    for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
+      dosages[variant_idx][sample_idx] =
+          static_cast<double>((variant_idx + 2 * sample_idx) % 7) / 3.0;
+    }
+  }
+  const std::vector<std::vector<pgensparsescore::Edge>> edges{
+      {{0, 2.0}, {1, -1.0}},
+      {{0, 0.5}, {2, 4.0}},
+      {{0, -3.0}, {1, 0.25}, {1, 0.125}}};
+  {
+    pgensparsescore::MappedMatrix scalar(scalar_path.string(), score_ct,
+                                         sample_ct);
+    pgensparsescore::MappedMatrix blocked(blocked_path.string(), score_ct,
+                                          sample_ct);
+    pgensparsescore::BlockedDenseScorer scorer(4, score_ct, sample_ct,
+                                               &blocked);
+    for (uint32_t variant_idx = 0; variant_idx < dosages.size(); ++variant_idx) {
+      pgensparsescore::ApplyDenseDosage(dosages[variant_idx].data(), sample_ct,
+                                        edges[variant_idx], &scalar);
+      scorer.Add(dosages[variant_idx].data(), edges[variant_idx]);
+    }
+    scorer.Flush();
+    if (scorer.stats().block_ct != 1 ||
+        scorer.stats().maximum_variant_ct != 3 ||
+        scorer.stats().maximum_edge_ct != 7 ||
+        !scorer.stats().scoring_nanoseconds) {
+      throw std::runtime_error("blocked dense scorer statistics are wrong");
+    }
+    for (uint32_t score_idx = 0; score_idx < score_ct; ++score_idx) {
+      for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
+        ExpectNear(blocked.Row(score_idx)[sample_idx],
+                   scalar.Row(score_idx)[sample_idx],
+                   "blocked dense kernel");
+      }
+    }
+  }
+  std::filesystem::remove(scalar_path);
+  std::filesystem::remove(blocked_path);
 }
 
 void TestConditionalRansPgenReader() {
@@ -619,7 +668,9 @@ void TestMultiFragmentSingleDecodeScoring() {
   auto score = [&](const std::vector<std::string>& paths,
                    const std::filesystem::path& matrix_path,
                    const std::string& schema_path = "",
-                   uint32_t thread_ct = 1) {
+                   uint32_t thread_ct = 1,
+                   pgensparsescore::DenseScoringKernel kernel =
+                       pgensparsescore::DenseScoringKernel::kBlocked) {
     auto loaded =
         pgensparsescore::LoadScoreFragments(paths, index, schema_path);
     pgensparsescore::PgenDosageReader reader(pgen_path.string());
@@ -631,7 +682,7 @@ void TestMultiFragmentSingleDecodeScoring() {
       stats = pgensparsescore::ScoreFragments(
           index, loaded.fragments, loaded.score_maps, locations, &frequencies,
           pgensparsescore::MissingFrequencyPolicy::kError, readers,
-          &loaded.catalog, &matrix, thread_ct);
+          &loaded.catalog, &matrix, thread_ct, kernel);
       values.assign(matrix.Row(0), matrix.Row(0) + 2 * sample_ct);
     }
     std::filesystem::remove(matrix_path);
@@ -641,6 +692,10 @@ void TestMultiFragmentSingleDecodeScoring() {
                               directory / "combined.matrix.bin");
   const auto split = score({fragment_a_path.string(), fragment_b_path.string()},
                            directory / "split.matrix.bin", "", 4);
+  const auto scalar = score(
+      {fragment_a_path.string(), fragment_b_path.string()},
+      directory / "scalar.matrix.bin", "", 4,
+      pgensparsescore::DenseScoringKernel::kScalar);
   if (combined.second.variant_ct != variant_ct ||
       split.second.variant_ct != variant_ct || combined.second.edge_ct != 12 ||
       split.second.edge_ct != 12 ||
@@ -648,8 +703,10 @@ void TestMultiFragmentSingleDecodeScoring() {
       split.second.sparse_edge_ct + split.second.dense_edge_ct != 12 ||
       combined.second.sparse_update_ct + combined.second.dense_update_ct == 0 ||
       split.second.sparse_update_ct + split.second.dense_update_ct == 0 ||
-      split.second.parallel_variant_ct != 2 ||
-      combined.first != split.first) {
+      split.second.blocked_dense_variant_ct != 1 ||
+      split.second.blocked_dense_block_ct != 1 ||
+      scalar.second.blocked_dense_variant_ct != 0 ||
+      split.first != scalar.first || combined.first != split.first) {
     throw std::runtime_error(
         "splitting score fragments changed scores or genotype decode count");
   }
@@ -693,6 +750,7 @@ int main() {
   try {
     TestDenseKernel();
     TestSparseKernel();
+    TestBlockedDenseKernel();
     TestConditionalRansPgenReader();
     TestCatalogOrientation();
     TestRepeatedWeightRowsAreRetained();

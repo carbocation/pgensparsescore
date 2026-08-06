@@ -111,9 +111,13 @@ matching weights, regardless of the number of fragments. Memory is bounded by
 the index, the current variant's edges, cohort-location and frequency arrays,
 and the file-backed score matrix. Fragmentation therefore shortens and
 parallelizes the build without multiplying genotype reads. During scoring,
-the binary divides each dosage's samples among a persistent worker pool using
-all physical cores visible to the process. `--threads N` overrides that
-default. Additional threads do not read the same genotype again.
+the binary uses all physical cores visible to the process. `--threads N`
+overrides that default. Dense genotypes are scored in bounded blocks: the
+scorer groups a block's weights by output score, assigns each score row to one
+worker, and applies all of that row's weights before moving on. Sparse
+genotypes continue to use the carrier-only path. Neither path reads a genotype
+twice. `--scoring-kernel scalar` retains the earlier variant-at-a-time dense
+kernel for comparisons.
 
 ## Monolithic compiled catalogs
 

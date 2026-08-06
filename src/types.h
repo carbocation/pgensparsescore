@@ -66,6 +66,12 @@ struct ScoreRunStats {
   uint64_t dense_update_ct = 0;
   uint64_t parallel_variant_ct = 0;
   uint64_t parallel_update_ct = 0;
+  uint64_t blocked_dense_block_ct = 0;
+  uint64_t blocked_dense_variant_ct = 0;
+  uint64_t blocked_dense_edge_ct = 0;
+  uint32_t blocked_dense_maximum_variant_ct = 0;
+  uint64_t blocked_dense_maximum_edge_ct = 0;
+  uint64_t blocked_dense_scoring_nanoseconds = 0;
   uint64_t imputed_value_ct = 0;
   uint64_t external_frequency_variant_ct = 0;
   uint64_t cohort_frequency_variant_ct = 0;

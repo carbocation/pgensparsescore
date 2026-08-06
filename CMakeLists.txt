@@ -57,6 +57,7 @@ set_target_properties(ZSTD::ZSTD PROPERTIES
 )
 
 add_library(pgensparsescore_lib
+  src/blocked_dense_scorer.cc
   src/catalog.cc
   src/compiled_catalog.cc
   src/frequency.cc
