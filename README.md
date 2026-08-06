@@ -110,7 +110,10 @@ each one. A PGEN variant is decoded once and its dosage is applied to all
 matching weights, regardless of the number of fragments. Memory is bounded by
 the index, the current variant's edges, cohort-location and frequency arrays,
 and the file-backed score matrix. Fragmentation therefore shortens and
-parallelizes the build without multiplying genotype reads.
+parallelizes the build without multiplying genotype reads. During scoring,
+the binary divides independent score-row updates among a persistent worker
+pool using all physical cores visible to the process. `--threads N` overrides
+that default. Additional threads do not read the same genotype again.
 
 ## Monolithic compiled catalogs
 
@@ -342,7 +345,8 @@ Variant-index construction reports both passes through the list, hash-table
 size, and output bytes. Fragment construction reports files and weights read,
 excluded and repeated rows, blocks serialized, and output bytes. Fragment
 scoring reports fragment bytes opened, variant groups merged, and total PGEN
-decodes; the decode count is independent of the fragment count.
+decodes; the decode count is independent of the fragment count. It also reports
+the requested thread count and how many score updates used the parallel kernel.
 
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix

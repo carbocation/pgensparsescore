@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -51,6 +54,150 @@ struct LaterOrdinal {
     if (lhs.ordinal != rhs.ordinal) return lhs.ordinal > rhs.ordinal;
     return lhs.fragment_idx > rhs.fragment_idx;
   }
+};
+
+class ScoringWorkers {
+ public:
+  ScoringWorkers(uint32_t thread_ct, std::vector<double>* baselines,
+                 MappedMatrix* matrix)
+      : thread_ct_(thread_ct), baselines_(baselines), matrix_(matrix) {
+    if (!thread_ct_) {
+      throw std::runtime_error("fragment scoring thread count must be positive");
+    }
+    workers_.reserve(thread_ct_ - 1);
+    for (uint32_t worker_idx = 1; worker_idx < thread_ct_; ++worker_idx) {
+      workers_.emplace_back(&ScoringWorkers::WorkerLoop, this, worker_idx);
+    }
+  }
+
+  ~ScoringWorkers() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+      ++generation_;
+    }
+    start_.notify_all();
+    for (auto& worker : workers_) worker.join();
+  }
+
+  bool ApplyDense(const double* dosages, uint32_t sample_ct,
+                  const std::vector<Edge>& edges) {
+    const uint64_t update_ct =
+        static_cast<uint64_t>(sample_ct) * edges.size();
+    if (!ShouldParallelize(edges.size(), update_ct)) {
+      ApplyDenseDosage(dosages, sample_ct, edges, matrix_);
+      return false;
+    }
+    Dispatch(TaskType::kDense, dosages, sample_ct, 0.0, 0.0, nullptr,
+             nullptr, 0, edges);
+    return true;
+  }
+
+  bool ApplySparse(double common, double mean, const uint32_t* sample_ids,
+                   const uint16_t* dosage16, uint32_t value_ct,
+                   const std::vector<Edge>& edges) {
+    const uint64_t update_ct =
+        static_cast<uint64_t>(value_ct) * edges.size();
+    if (!ShouldParallelize(edges.size(), update_ct)) {
+      ApplySparseDosage(common, mean, sample_ids, dosage16, value_ct, edges,
+                        baselines_, matrix_);
+      return false;
+    }
+    Dispatch(TaskType::kSparse, nullptr, 0, common, mean, sample_ids, dosage16,
+             value_ct, edges);
+    return true;
+  }
+
+ private:
+  enum class TaskType { kDense, kSparse };
+  static constexpr uint64_t kMinimumParallelUpdates = 65536;
+
+  bool ShouldParallelize(size_t edge_ct, uint64_t update_ct) const {
+    return thread_ct_ > 1 && edge_ct > 1 &&
+           update_ct >= kMinimumParallelUpdates;
+  }
+
+  void Dispatch(TaskType type, const double* dense_values, uint32_t sample_ct,
+                double common, double mean, const uint32_t* sample_ids,
+                const uint16_t* dosage16, uint32_t value_ct,
+                const std::vector<Edge>& edges) {
+    const uint32_t active_thread_ct =
+        std::min<uint32_t>(thread_ct_, edges.size());
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      type_ = type;
+      dense_values_ = dense_values;
+      sample_ct_ = sample_ct;
+      common_ = common;
+      mean_ = mean;
+      sample_ids_ = sample_ids;
+      dosage16_ = dosage16;
+      value_ct_ = value_ct;
+      edges_ = &edges;
+      active_thread_ct_ = active_thread_ct;
+      pending_worker_ct_ = active_thread_ct - 1;
+      ++generation_;
+    }
+    start_.notify_all();
+    ApplyRange(0, active_thread_ct);
+    std::unique_lock<std::mutex> lock(mutex_);
+    done_.wait(lock, [&] { return pending_worker_ct_ == 0; });
+  }
+
+  void ApplyRange(uint32_t worker_idx, uint32_t active_thread_ct) {
+    const size_t edge_begin = edges_->size() * worker_idx / active_thread_ct;
+    const size_t edge_end = edges_->size() * (worker_idx + 1) / active_thread_ct;
+    if (type_ == TaskType::kDense) {
+      ApplyDenseDosageRange(dense_values_, sample_ct_, *edges_, edge_begin,
+                            edge_end, matrix_);
+    } else {
+      ApplySparseDosageRange(common_, mean_, sample_ids_, dosage16_, value_ct_,
+                             *edges_, edge_begin, edge_end, baselines_, matrix_);
+    }
+  }
+
+  void WorkerLoop(uint32_t worker_idx) {
+    uint64_t observed_generation = 0;
+    for (;;) {
+      uint32_t active_thread_ct = 0;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        start_.wait(lock, [&] {
+          return stopping_ || generation_ != observed_generation;
+        });
+        if (stopping_) return;
+        observed_generation = generation_;
+        active_thread_ct = active_thread_ct_;
+      }
+      if (worker_idx >= active_thread_ct) continue;
+      ApplyRange(worker_idx, active_thread_ct);
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!--pending_worker_ct_) done_.notify_one();
+      }
+    }
+  }
+
+  uint32_t thread_ct_;
+  std::vector<double>* baselines_;
+  MappedMatrix* matrix_;
+  std::vector<std::thread> workers_;
+  std::mutex mutex_;
+  std::condition_variable start_;
+  std::condition_variable done_;
+  bool stopping_ = false;
+  uint64_t generation_ = 0;
+  uint32_t active_thread_ct_ = 0;
+  uint32_t pending_worker_ct_ = 0;
+  TaskType type_ = TaskType::kDense;
+  const double* dense_values_ = nullptr;
+  uint32_t sample_ct_ = 0;
+  double common_ = 0.0;
+  double mean_ = 0.0;
+  const uint32_t* sample_ids_ = nullptr;
+  const uint16_t* dosage16_ = nullptr;
+  uint32_t value_ct_ = 0;
+  const std::vector<Edge>* edges_ = nullptr;
 };
 
 }  // namespace
@@ -341,7 +488,7 @@ ScoreRunStats ScoreFragments(
     const IndexedFrequencyTable* frequencies,
     MissingFrequencyPolicy missing_frequency_policy,
     const std::vector<PgenDosageReader*>& readers, Catalog* catalog,
-    MappedMatrix* matrix, ProgressReporter* progress) {
+    MappedMatrix* matrix, uint32_t thread_ct, ProgressReporter* progress) {
   if (locations.size() != index.variant_ct() || fragments.empty() ||
       score_maps.size() != fragments.size() ||
       readers.empty() || matrix->row_ct() != catalog->scores.size() ||
@@ -363,6 +510,7 @@ ScoreRunStats ScoreFragments(
 
   ScoreRunStats stats;
   std::vector<double> baselines(catalog->scores.size(), 0.0);
+  ScoringWorkers scoring_workers(thread_ct, &baselines, matrix);
   std::vector<Edge> combined_edges;
   uint64_t variant_groups_processed = 0;
 
@@ -479,16 +627,27 @@ ScoreRunStats ScoreFragments(
         stats.sparse_update_ct +=
             static_cast<uint64_t>(combined_edges.size()) *
             dosage.sparse_value_ct;
-        ApplySparseDosage(dosage.common, dosage.mean, dosage.sparse_sample_ids,
-                          dosage.sparse_dosage16, dosage.sparse_value_ct,
-                          combined_edges, &baselines, matrix);
+        if (scoring_workers.ApplySparse(
+                dosage.common, dosage.mean, dosage.sparse_sample_ids,
+                dosage.sparse_dosage16, dosage.sparse_value_ct,
+                combined_edges)) {
+          ++stats.parallel_variant_ct;
+          stats.parallel_update_ct +=
+              static_cast<uint64_t>(combined_edges.size()) *
+              dosage.sparse_value_ct;
+        }
       } else {
         ++stats.dense_variant_ct;
         stats.dense_edge_ct += combined_edges.size();
         stats.dense_update_ct +=
             static_cast<uint64_t>(combined_edges.size()) * reader->sample_ct();
-        ApplyDenseDosage(dosage.dense_values, reader->sample_ct(),
-                         combined_edges, matrix);
+        if (scoring_workers.ApplyDense(dosage.dense_values,
+                                       reader->sample_ct(), combined_edges)) {
+          ++stats.parallel_variant_ct;
+          stats.parallel_update_ct +=
+              static_cast<uint64_t>(combined_edges.size()) *
+              reader->sample_ct();
+        }
       }
       if (progress && !(stats.variant_ct % 10000)) {
         progress->MaybeEvent(
@@ -504,6 +663,8 @@ ScoreRunStats ScoreFragments(
              {"dense_weight_edges", stats.dense_edge_ct},
              {"sparse_score_updates", stats.sparse_update_ct},
              {"dense_score_updates", stats.dense_update_ct},
+             {"parallel_variants", stats.parallel_variant_ct},
+             {"parallel_score_updates", stats.parallel_update_ct},
              {"imputed_values", stats.imputed_value_ct}});
       }
       if (!(stats.variant_ct % 100000)) {
@@ -526,6 +687,8 @@ ScoreRunStats ScoreFragments(
            {"dense_weight_edges", stats.dense_edge_ct},
            {"sparse_score_updates", stats.sparse_update_ct},
            {"dense_score_updates", stats.dense_update_ct},
+           {"parallel_variants", stats.parallel_variant_ct},
+           {"parallel_score_updates", stats.parallel_update_ct},
            {"imputed_values", stats.imputed_value_ct}});
     }
   }
@@ -551,6 +714,9 @@ ScoreRunStats ScoreFragments(
          {"dense_weight_edges", stats.dense_edge_ct},
          {"sparse_score_updates", stats.sparse_update_ct},
          {"dense_score_updates", stats.dense_update_ct},
+         {"parallel_variants", stats.parallel_variant_ct},
+         {"parallel_score_updates", stats.parallel_update_ct},
+         {"scoring_threads", thread_ct},
          {"imputed_values", stats.imputed_value_ct}});
   }
   return stats;

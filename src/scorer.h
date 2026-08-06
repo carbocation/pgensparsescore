@@ -14,12 +14,21 @@ namespace pgensparsescore {
 
 void ApplyDenseDosage(const double* dosages, uint32_t sample_ct,
                       const std::vector<Edge>& edges, MappedMatrix* matrix);
+void ApplyDenseDosageRange(const double* dosages, uint32_t sample_ct,
+                           const std::vector<Edge>& edges, size_t edge_begin,
+                           size_t edge_end, MappedMatrix* matrix);
 void ApplySparseDosage(double common, double mean,
                        const uint32_t* sample_ids,
                        const uint16_t* dosage16, uint32_t value_ct,
                        const std::vector<Edge>& edges,
                        std::vector<double>* baselines,
                        MappedMatrix* matrix);
+void ApplySparseDosageRange(double common, double mean,
+                            const uint32_t* sample_ids,
+                            const uint16_t* dosage16, uint32_t value_ct,
+                            const std::vector<Edge>& edges, size_t edge_begin,
+                            size_t edge_end, std::vector<double>* baselines,
+                            MappedMatrix* matrix);
 ScoreRunStats ApplyMissingFrequencyPolicy(
     Catalog* catalog, const std::vector<Variant>& variants,
     const FrequencyTable* frequencies, MissingFrequencyPolicy policy);

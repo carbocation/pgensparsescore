@@ -47,6 +47,7 @@ else()
 endif()
 
 find_package(ZLIB REQUIRED)
+find_package(Threads REQUIRED)
 find_path(ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
 find_library(ZSTD_LIBRARY NAMES zstd libzstd REQUIRED)
 add_library(ZSTD::ZSTD UNKNOWN IMPORTED)
@@ -72,6 +73,7 @@ add_library(pgensparsescore_lib
 target_include_directories(pgensparsescore_lib PUBLIC src)
 target_link_libraries(
   pgensparsescore_lib PUBLIC pgen_rans::pgenlib ZLIB::ZLIB ZSTD::ZSTD
+                             Threads::Threads
 )
 target_compile_options(pgensparsescore_lib PRIVATE
   $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic>

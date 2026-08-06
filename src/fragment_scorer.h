@@ -58,6 +58,7 @@ ScoreRunStats ScoreFragments(
     const IndexedFrequencyTable* frequencies,
     MissingFrequencyPolicy missing_frequency_policy,
     const std::vector<PgenDosageReader*>& readers, Catalog* catalog,
-    MappedMatrix* matrix, ProgressReporter* progress = nullptr);
+    MappedMatrix* matrix, uint32_t thread_ct = 1,
+    ProgressReporter* progress = nullptr);
 
 }  // namespace pgensparsescore

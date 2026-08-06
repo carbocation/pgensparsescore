@@ -7,12 +7,20 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sched.h>
+#endif
 
 #include "catalog.h"
 #include "compiled_catalog.h"
@@ -43,6 +51,7 @@ struct Options {
   std::string read_freq;
   std::string progress_jsonl;
   std::string progress_interval_seconds;
+  std::string threads;
   std::string out;
   pgensparsescore::MissingFrequencyPolicy missing_frequency_policy =
       pgensparsescore::MissingFrequencyPolicy::kCohort;
@@ -134,6 +143,7 @@ void PrintUsage(std::ostream& stream) {
       "                     [--score-schema FILE] \\\n"
       "                     [--progress-jsonl FILE] \\\n"
       "                     [--progress-interval-seconds N] \\\n"
+      "                     [--threads N] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
 }
 
@@ -147,6 +157,39 @@ uint32_t ParsePositiveU32(const std::string& value,
     throw std::runtime_error(argument + " must be a positive integer");
   }
   return result;
+}
+
+uint32_t PhysicalCoreCount() {
+#if defined(__APPLE__)
+  uint32_t physical_core_ct = 0;
+  size_t byte_ct = sizeof(physical_core_ct);
+  if (!sysctlbyname("hw.physicalcpu", &physical_core_ct, &byte_ct, nullptr,
+                    0) &&
+      physical_core_ct) {
+    return physical_core_ct;
+  }
+#elif defined(__linux__)
+  cpu_set_t allowed_cpus;
+  CPU_ZERO(&allowed_cpus);
+  if (!sched_getaffinity(0, sizeof(allowed_cpus), &allowed_cpus)) {
+    std::set<std::pair<int, int>> physical_cores;
+    for (int cpu_idx = 0; cpu_idx < CPU_SETSIZE; ++cpu_idx) {
+      if (!CPU_ISSET(cpu_idx, &allowed_cpus)) continue;
+      const std::string topology = "/sys/devices/system/cpu/cpu" +
+                                   std::to_string(cpu_idx) + "/topology/";
+      std::ifstream package_input(topology + "physical_package_id");
+      std::ifstream core_input(topology + "core_id");
+      int package_idx = 0;
+      int core_idx = 0;
+      if (package_input >> package_idx && core_input >> core_idx) {
+        physical_cores.emplace(package_idx, core_idx);
+      }
+    }
+    if (!physical_cores.empty()) return physical_cores.size();
+  }
+#endif
+  const uint32_t logical_core_ct = std::thread::hardware_concurrency();
+  return logical_core_ct ? logical_core_ct : 1;
 }
 
 uint32_t ParseProgressInterval(const std::string& value) {
@@ -359,6 +402,7 @@ Options ParseOptions(int argc, char** argv) {
       {"--read-freq", &options.read_freq},
       {"--progress-jsonl", &options.progress_jsonl},
       {"--progress-interval-seconds", &options.progress_interval_seconds},
+      {"--threads", &options.threads},
       {"--out", &options.out},
   };
   for (int idx = 1; idx < argc; ++idx) {
@@ -413,6 +457,9 @@ Options ParseOptions(int argc, char** argv) {
   if (options.fragment_list.empty() && !options.score_schema.empty()) {
     throw std::runtime_error("--score-schema requires --fragment-list");
   }
+  if (options.fragment_list.empty() && !options.threads.empty()) {
+    throw std::runtime_error("--threads requires --fragment-list");
+  }
   if (!options.fragment_list.empty() && !options.variant_map.empty()) {
     throw std::runtime_error(
         "fragment indexes already contain ID aliases; do not use --variant-map");
@@ -441,6 +488,9 @@ Options ParseOptions(int argc, char** argv) {
   }
   if (!options.progress_interval_seconds.empty()) {
     ParseProgressInterval(options.progress_interval_seconds);
+  }
+  if (!options.threads.empty()) {
+    ParsePositiveU32(options.threads, "--threads");
   }
   return options;
 }
@@ -589,6 +639,8 @@ void AddStats(const pgensparsescore::ScoreRunStats& input,
   output->sparse_value_ct += input.sparse_value_ct;
   output->sparse_update_ct += input.sparse_update_ct;
   output->dense_update_ct += input.dense_update_ct;
+  output->parallel_variant_ct += input.parallel_variant_ct;
+  output->parallel_update_ct += input.parallel_update_ct;
   output->imputed_value_ct += input.imputed_value_ct;
   output->external_frequency_variant_ct += input.external_frequency_variant_ct;
   output->cohort_frequency_variant_ct += input.cohort_frequency_variant_ct;
@@ -608,7 +660,8 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
                    const pgensparsescore::Catalog& catalog,
                    const pgensparsescore::ScoreRunStats& stats,
                    uint32_t score_fragment_ct = 0,
-                   uint64_t variant_index_variant_ct = 0) {
+                   uint64_t variant_index_variant_ct = 0,
+                   uint32_t scoring_thread_ct = 1) {
   {
     std::ofstream output(prefix + ".score-metadata.tsv");
     if (!output) throw std::runtime_error("cannot write score metadata");
@@ -660,6 +713,7 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << MissingFrequencyPolicyName(frequency_policy) << "\",\n"
            << "  \"working_matrix_bytes\": " << working_matrix_byte_ct
            << ",\n"
+           << "  \"scoring_threads\": " << scoring_thread_ct << ",\n"
            << "  \"scored_variants\": " << stats.variant_ct << ",\n"
            << "  \"weight_edges\": " << stats.edge_ct << ",\n"
            << "  \"sparse_variants\": " << stats.sparse_variant_ct << ",\n"
@@ -669,6 +723,10 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
            << "  \"sparse_dosage_values\": " << stats.sparse_value_ct << ",\n"
            << "  \"sparse_score_updates\": " << stats.sparse_update_ct << ",\n"
            << "  \"dense_score_updates\": " << stats.dense_update_ct << ",\n"
+           << "  \"parallel_variants\": " << stats.parallel_variant_ct
+           << ",\n"
+           << "  \"parallel_score_updates\": " << stats.parallel_update_ct
+           << ",\n"
            << "  \"imputed_values\": " << stats.imputed_value_ct << ",\n"
            << "  \"external_frequency_variants\": "
            << stats.external_frequency_variant_ct << ",\n"
@@ -788,6 +846,10 @@ int RunFragmentScoring(
   const std::string working_path = options.out + ".work.score-major.bin";
   RemoveFileOnExit remove_working(working_path);
   uint64_t working_matrix_byte_ct = 0;
+  const uint32_t scoring_thread_ct = options.threads.empty()
+                                         ? PhysicalCoreCount()
+                                         : ParsePositiveU32(options.threads,
+                                                            "--threads");
   pgensparsescore::ScoreRunStats stats;
   {
     pgensparsescore::MappedMatrix matrix(
@@ -800,13 +862,14 @@ int RunFragmentScoring(
            {"sample_rows", samples.size()},
            {"score_columns", loaded.catalog.scores.size()},
            {"score_fragments", loaded.fragments.size()},
-           {"fragment_weights", loaded.weight_ct}});
+           {"fragment_weights", loaded.weight_ct},
+           {"scoring_threads", scoring_thread_ct}});
     }
     stats = pgensparsescore::ScoreFragments(
         variant_index, loaded.fragments, loaded.score_maps, locations,
         frequencies ? &*frequencies : nullptr,
         options.missing_frequency_policy, readers, &loaded.catalog, &matrix,
-        progress);
+        scoring_thread_ct, progress);
     WriteWideScores(options.out, samples, loaded.catalog, matrix, progress);
   }
   remove_working.RemoveNow();
@@ -815,7 +878,8 @@ int RunFragmentScoring(
       inputs.size(), frequencies ? frequencies->matched_row_ct : 0,
       variant_index.variant_ct(), indexed_pvar_variant_ct, storage_modes,
       "fragments", options.missing_frequency_policy, working_matrix_byte_ct,
-      loaded.catalog, stats, loaded.fragments.size(), variant_index.variant_ct());
+      loaded.catalog, stats, loaded.fragments.size(), variant_index.variant_ct(),
+      scoring_thread_ct);
   if (progress) {
     progress->Event(
         "score", "complete",
@@ -831,6 +895,9 @@ int RunFragmentScoring(
          {"dense_weight_edges", stats.dense_edge_ct},
          {"sparse_score_updates", stats.sparse_update_ct},
          {"dense_score_updates", stats.dense_update_ct},
+         {"parallel_variants", stats.parallel_variant_ct},
+         {"parallel_score_updates", stats.parallel_update_ct},
+         {"scoring_threads", scoring_thread_ct},
          {"imputed_values", stats.imputed_value_ct}});
   }
   std::cerr << "wrote " << loaded.catalog.scores.size()

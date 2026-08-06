@@ -501,7 +501,7 @@ void TestScoreFragment() {
 }
 
 void TestMultiFragmentSingleDecodeScoring() {
-  constexpr uint32_t sample_ct = 33;
+  constexpr uint32_t sample_ct = 40001;
   constexpr uint32_t variant_ct = 2;
   const auto directory = TempPath("-multi-fragment-score");
   std::filesystem::create_directories(directory);
@@ -608,7 +608,8 @@ void TestMultiFragmentSingleDecodeScoring() {
   frequencies.matched_row_ct = 2;
   auto score = [&](const std::vector<std::string>& paths,
                    const std::filesystem::path& matrix_path,
-                   const std::string& schema_path = "") {
+                   const std::string& schema_path = "",
+                   uint32_t thread_ct = 1) {
     auto loaded =
         pgensparsescore::LoadScoreFragments(paths, index, schema_path);
     pgensparsescore::PgenDosageReader reader(pgen_path.string());
@@ -620,7 +621,7 @@ void TestMultiFragmentSingleDecodeScoring() {
       stats = pgensparsescore::ScoreFragments(
           index, loaded.fragments, loaded.score_maps, locations, &frequencies,
           pgensparsescore::MissingFrequencyPolicy::kError, readers,
-          &loaded.catalog, &matrix);
+          &loaded.catalog, &matrix, thread_ct);
       values.assign(matrix.Row(0), matrix.Row(0) + 2 * sample_ct);
     }
     std::filesystem::remove(matrix_path);
@@ -629,7 +630,7 @@ void TestMultiFragmentSingleDecodeScoring() {
   const auto combined = score({combined_path.string()},
                               directory / "combined.matrix.bin");
   const auto split = score({fragment_a_path.string(), fragment_b_path.string()},
-                           directory / "split.matrix.bin");
+                           directory / "split.matrix.bin", "", 4);
   if (combined.second.variant_ct != variant_ct ||
       split.second.variant_ct != variant_ct || combined.second.edge_ct != 4 ||
       split.second.edge_ct != 4 ||
@@ -637,6 +638,7 @@ void TestMultiFragmentSingleDecodeScoring() {
       split.second.sparse_edge_ct + split.second.dense_edge_ct != 4 ||
       combined.second.sparse_update_ct + combined.second.dense_update_ct == 0 ||
       split.second.sparse_update_ct + split.second.dense_update_ct == 0 ||
+      split.second.parallel_variant_ct != 1 ||
       combined.first != split.first) {
     throw std::runtime_error(
         "splitting score fragments changed scores or genotype decode count");
