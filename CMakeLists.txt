@@ -40,7 +40,7 @@ else()
   FetchContent_Declare(
     plink_ng
     GIT_REPOSITORY https://github.com/carbocation/plink-ng.git
-    GIT_TAG 7fb5145936e72ec22a4902504a8bd8bb5e5477c3
+    GIT_TAG 9b3dc0c4397e239214c441ad170a567b1138313c
     GIT_SHALLOW FALSE
   )
   FetchContent_MakeAvailable(plink_ng)
