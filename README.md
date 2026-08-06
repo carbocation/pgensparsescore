@@ -346,7 +346,7 @@ size, and output bytes. Fragment construction reports files and weights read,
 excluded and repeated rows, blocks serialized, and output bytes. Fragment
 scoring reports fragment bytes opened, variant groups merged, and total PGEN
 decodes; the decode count is independent of the fragment count. It also reports
-the requested thread count and how many score updates used the parallel kernel.
+the resolved thread count and how many score updates used the parallel kernel.
 
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix
