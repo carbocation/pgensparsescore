@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,7 @@
 #include "mapped_matrix.h"
 #include "pfile.h"
 #include "pgen_reader.h"
+#include "progress.h"
 #include "scorer.h"
 
 namespace {
@@ -33,6 +35,8 @@ struct Options {
   std::string compiled_catalog;
   std::string variant_map;
   std::string read_freq;
+  std::string progress_jsonl;
+  std::string progress_interval_seconds;
   std::string out;
   pgensparsescore::MissingFrequencyPolicy missing_frequency_policy =
       pgensparsescore::MissingFrequencyPolicy::kCohort;
@@ -42,6 +46,8 @@ struct Options {
 struct CompileOptions {
   std::string manifest;
   std::string variant_map;
+  std::string progress_jsonl;
+  std::string progress_interval_seconds;
   std::string out;
 };
 
@@ -73,17 +79,47 @@ void PrintUsage(std::ostream& stream) {
   stream <<
       "Usage:\n"
       "  pgensparsescore compile --manifest FILE [--variant-map FILE] \\\n"
+      "                          [--progress-jsonl FILE] \\\n"
+      "                          [--progress-interval-seconds N] \\\n"
       "                          --out CATALOG.bin\n"
       "  pgensparsescore --pgen FILE --pvar FILE --psam FILE \\\n"
       "                     (--manifest FILE | --compiled-catalog FILE) \\\n"
       "                     [--variant-map FILE] \\\n"
       "                     [--read-freq FILE] \\\n"
+      "                     [--progress-jsonl FILE] \\\n"
+      "                     [--progress-interval-seconds N] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n"
       "  pgensparsescore --pfile-list FILE \\\n"
       "                     (--manifest FILE | --compiled-catalog FILE) \\\n"
       "                     [--variant-map FILE] \\\n"
       "                     [--read-freq FILE] \\\n"
+      "                     [--progress-jsonl FILE] \\\n"
+      "                     [--progress-interval-seconds N] \\\n"
       "                     [--missing-freq cohort|error|omit] --out PREFIX\n";
+}
+
+uint32_t ParseProgressInterval(const std::string& value) {
+  if (value.empty()) {
+    return 30;
+  }
+  uint32_t result = 0;
+  const auto parsed =
+      std::from_chars(value.data(), value.data() + value.size(), result);
+  if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() ||
+      !result) {
+    throw std::runtime_error(
+        "--progress-interval-seconds must be a positive integer");
+  }
+  return result;
+}
+
+std::unique_ptr<pgensparsescore::ProgressReporter> MakeProgressReporter(
+    const std::string& path, const std::string& interval_seconds) {
+  if (path.empty()) {
+    return nullptr;
+  }
+  return std::make_unique<pgensparsescore::ProgressReporter>(
+      path, ParseProgressInterval(interval_seconds));
 }
 
 pgensparsescore::MissingFrequencyPolicy ParseMissingFrequencyPolicy(
@@ -123,6 +159,8 @@ CompileOptions ParseCompileOptions(int argc, char** argv) {
   std::unordered_map<std::string, std::string*> destinations{
       {"--manifest", &options.manifest},
       {"--variant-map", &options.variant_map},
+      {"--progress-jsonl", &options.progress_jsonl},
+      {"--progress-interval-seconds", &options.progress_interval_seconds},
       {"--out", &options.out},
   };
   for (int idx = 2; idx < argc; ++idx) {
@@ -142,6 +180,18 @@ CompileOptions ParseCompileOptions(int argc, char** argv) {
   if (options.manifest.empty() || options.out.empty()) {
     throw std::runtime_error("compile requires --manifest and --out");
   }
+  if (!options.progress_interval_seconds.empty() &&
+      options.progress_jsonl.empty()) {
+    throw std::runtime_error(
+        "--progress-interval-seconds requires --progress-jsonl");
+  }
+  if (!options.progress_interval_seconds.empty()) {
+    ParseProgressInterval(options.progress_interval_seconds);
+  }
+  if (options.progress_jsonl == options.out ||
+      options.progress_jsonl == options.out + ".json") {
+    throw std::runtime_error("progress log and compile output must differ");
+  }
   return options;
 }
 
@@ -160,6 +210,8 @@ Options ParseOptions(int argc, char** argv) {
       {"--compiled-catalog", &options.compiled_catalog},
       {"--variant-map", &options.variant_map},
       {"--read-freq", &options.read_freq},
+      {"--progress-jsonl", &options.progress_jsonl},
+      {"--progress-interval-seconds", &options.progress_interval_seconds},
       {"--out", &options.out},
   };
   for (int idx = 1; idx < argc; ++idx) {
@@ -219,6 +271,14 @@ Options ParseOptions(int argc, char** argv) {
     throw std::runtime_error(
         "error and omit missing-frequency policies require --read-freq");
   }
+  if (!options.progress_interval_seconds.empty() &&
+      options.progress_jsonl.empty()) {
+    throw std::runtime_error(
+        "--progress-interval-seconds requires --progress-jsonl");
+  }
+  if (!options.progress_interval_seconds.empty()) {
+    ParseProgressInterval(options.progress_interval_seconds);
+  }
   return options;
 }
 
@@ -236,7 +296,8 @@ void AppendDouble(double value, std::string* output) {
 void WriteWideScores(const std::string& prefix,
                      const std::vector<pgensparsescore::Sample>& samples,
                      const pgensparsescore::Catalog& catalog,
-                     const pgensparsescore::MappedMatrix& matrix) {
+                     const pgensparsescore::MappedMatrix& matrix,
+                     pgensparsescore::ProgressReporter* progress) {
   const std::string final_path = prefix + ".scores.tsv.gz";
   const std::string temporary_path = final_path + ".tmp";
   RemoveFileOnExit remove_temporary(temporary_path);
@@ -259,6 +320,13 @@ void WriteWideScores(const std::string& prefix,
                             kTransposeBufferBytes / bytes_per_sample)));
   std::vector<double> sample_major_block(
       static_cast<uint64_t>(block_capacity) * catalog.scores.size());
+
+  if (progress) {
+    progress->Event("score", "write_scores",
+                    {{"sample_rows_written", 0},
+                     {"sample_rows_total", samples.size()},
+                     {"score_columns", catalog.scores.size()}});
+  }
 
   for (uint32_t sample_begin = 0; sample_begin < samples.size();
        sample_begin += block_capacity) {
@@ -293,10 +361,23 @@ void WriteWideScores(const std::string& prefix,
       line.push_back('\n');
       output.Write(line);
     }
+    if (progress) {
+      progress->MaybeEvent(
+          "score", "write_scores",
+          {{"sample_rows_written", sample_begin + block_size},
+           {"sample_rows_total", samples.size()},
+           {"score_columns", catalog.scores.size()}});
+    }
   }
   output.Close();
   std::filesystem::rename(temporary_path, final_path);
   remove_temporary.Release();
+  if (progress) {
+    progress->Event("score", "scores_written",
+                    {{"sample_rows_written", samples.size()},
+                     {"score_columns", catalog.scores.size()},
+                     {"output_bytes", std::filesystem::file_size(final_path)}});
+  }
 }
 
 bool SamplesEqual(const std::vector<pgensparsescore::Sample>& lhs,
@@ -458,6 +539,12 @@ int CompileMain(int argc, char** argv) {
       std::filesystem::exists(options.out + ".json")) {
     throw std::runtime_error("compile output already exists: " + options.out);
   }
+  auto progress = MakeProgressReporter(options.progress_jsonl,
+                                       options.progress_interval_seconds);
+  if (progress) {
+    progress->Event("compile", "start", {},
+                    {{"manifest", options.manifest}, {"output", options.out}});
+  }
   std::optional<pgensparsescore::VariantMap> variant_map;
   std::unordered_set<std::string> included_source_ids;
   if (!options.variant_map.empty()) {
@@ -467,14 +554,25 @@ int CompileMain(int argc, char** argv) {
       static_cast<void>(target_id);
       included_source_ids.insert(source_id);
     }
+    if (progress) {
+      progress->Event("compile", "variant_filter_loaded",
+                      {{"included_variants", included_source_ids.size()}});
+    }
   }
   const auto catalog = pgensparsescore::CompileSourceCatalog(
       options.manifest,
-      variant_map ? &included_source_ids : nullptr);
-  pgensparsescore::WriteCompiledCatalog(options.out, catalog);
+      variant_map ? &included_source_ids : nullptr, progress.get());
+  pgensparsescore::WriteCompiledCatalog(options.out, catalog, progress.get());
   WriteCompiledCatalogMetadata(
       options.out, catalog,
       variant_map ? variant_map->size() : catalog.variants.size());
+  if (progress) {
+    progress->Event("compile", "complete",
+                    {{"scores", catalog.scores.size()},
+                     {"variants", catalog.variants.size()},
+                     {"weights", catalog.weight_ct},
+                     {"output_bytes", std::filesystem::file_size(options.out)}});
+  }
   std::cerr << "compiled " << catalog.scores.size() << " scores, "
             << catalog.variants.size() << " variants, and "
             << catalog.weight_ct << " nonzero weights into " << options.out
@@ -494,19 +592,33 @@ int main(int argc, char** argv) {
     if (!output_path.parent_path().empty()) {
       std::filesystem::create_directories(output_path.parent_path());
     }
+    auto progress = MakeProgressReporter(options.progress_jsonl,
+                                         options.progress_interval_seconds);
+    if (progress) {
+      progress->Event("score", "start", {}, {{"output", options.out}});
+    }
     const std::vector<pgensparsescore::PfileSpec> inputs =
         options.pfile_list.empty()
             ? std::vector<pgensparsescore::PfileSpec>{
                   {options.pgen, options.pvar, options.psam}}
             : pgensparsescore::ReadPfileList(options.pfile_list);
+    if (progress) {
+      progress->Event("score", "pfile_inputs_loaded",
+                      {{"pgen_inputs", inputs.size()}});
+    }
     std::optional<pgensparsescore::CompiledCatalog> compiled_catalog;
     if (!options.compiled_catalog.empty()) {
       compiled_catalog =
-          pgensparsescore::ReadCompiledCatalog(options.compiled_catalog);
+          pgensparsescore::ReadCompiledCatalog(options.compiled_catalog,
+                                               progress.get());
     }
     std::optional<pgensparsescore::VariantMap> variant_map;
     if (!options.variant_map.empty()) {
       variant_map = pgensparsescore::ReadVariantMap(options.variant_map);
+      if (progress) {
+        progress->Event("score", "variant_map_loaded",
+                        {{"variant_mapping_rows", variant_map->size()}});
+      }
     }
     std::unordered_set<std::string> target_variant_ids;
     const bool filter_pvar = compiled_catalog.has_value() ||
@@ -532,6 +644,10 @@ int main(int argc, char** argv) {
     }
 
     auto samples = pgensparsescore::ReadPsam(inputs.front().psam);
+    if (progress) {
+      progress->Event("score", "samples_loaded",
+                      {{"samples", samples.size()}});
+    }
     std::vector<pgensparsescore::Variant> all_variants;
     std::vector<uint32_t> input_by_variant;
     std::vector<uint32_t> local_index_by_variant;
@@ -561,15 +677,27 @@ int main(int argc, char** argv) {
         input_by_variant.push_back(input_idx);
         local_index_by_variant.push_back(local_idx);
       }
+      if (progress) {
+        progress->Event(
+            "score", "pvar_loaded",
+            {{"pgen_input_index", input_idx},
+             {"pgen_inputs", inputs.size()},
+             {"pvar_rows", pvar.row_ct},
+             {"retained_pvar_variants", pvar.variants.size()},
+             {"retained_pvar_variants_total", all_variants.size()}},
+            {{"pvar", inputs[input_idx].pvar}});
+      }
     }
     const uint64_t pvar_variant_ct = all_variants.size();
     auto catalog = compiled_catalog
                        ? pgensparsescore::MaterializeCompiledCatalog(
                              *compiled_catalog, all_variants,
-                             variant_map ? &*variant_map : nullptr)
+                             variant_map ? &*variant_map : nullptr,
+                             progress.get())
                        : pgensparsescore::CompileCatalog(
                              options.manifest, all_variants,
-                             variant_map ? &*variant_map : nullptr);
+                             variant_map ? &*variant_map : nullptr,
+                             progress.get());
     std::optional<pgensparsescore::FrequencyTable> frequencies;
     if (!options.read_freq.empty()) {
       std::unordered_set<std::string> scored_variant_ids;
@@ -579,6 +707,11 @@ int main(int argc, char** argv) {
       }
       frequencies = pgensparsescore::ReadFrequencyTable(
           options.read_freq, &scored_variant_ids);
+      if (progress) {
+        progress->Event("score", "frequencies_loaded",
+                        {{"frequency_rows", frequencies->size()},
+                         {"scored_variant_ids", scored_variant_ids.size()}});
+      }
     }
     pgensparsescore::ScoreRunStats stats =
         pgensparsescore::ApplyMissingFrequencyPolicy(
@@ -609,6 +742,12 @@ int main(int argc, char** argv) {
       pgensparsescore::MappedMatrix matrix(
           working_path, catalog.scores.size(), samples.size());
       working_matrix_byte_ct = matrix.byte_ct();
+      if (progress) {
+        progress->Event("score", "working_matrix_ready",
+                        {{"working_matrix_bytes", working_matrix_byte_ct},
+                         {"sample_rows", samples.size()},
+                         {"score_columns", catalog.scores.size()}});
+      }
 
       auto process = [&](size_t input_idx,
                          const pgensparsescore::PfileSpec& input,
@@ -625,17 +764,37 @@ int main(int argc, char** argv) {
           throw std::runtime_error("PGEN/PSAM sample-count mismatch: " +
                                    input.pgen);
         }
+        if (progress) {
+          progress->Event(
+              "score", "pgen_start",
+              {{"pgen_input_index", input_idx},
+               {"pgen_inputs", inputs.size()},
+               {"variants_to_score", input_catalog.variants.size()}},
+              {{"pgen", input.pgen},
+               {"storage_mode", reader.storage_mode_name()}});
+        }
         const auto input_stats = pgensparsescore::ScoreCatalog(
             input_catalog, variants, frequencies ? &*frequencies : nullptr,
-            options.missing_frequency_policy, &reader, &matrix);
+            options.missing_frequency_policy, &reader, &matrix,
+            progress.get());
         AddStats(input_stats, &stats);
+        if (progress) {
+          progress->Event(
+              "score", "pgen_scored",
+              {{"pgen_input_index", input_idx},
+               {"pgen_inputs", inputs.size()},
+               {"scored_variants_total", stats.variant_ct},
+               {"weight_edges_total", stats.edge_ct},
+               {"sparse_variants_total", stats.sparse_variant_ct},
+               {"dense_variants_total", stats.dense_variant_ct}});
+        }
       };
 
       for (size_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
         process(input_idx, inputs[input_idx], variants_by_input[input_idx],
                 catalog_by_input[input_idx], pvar_row_counts[input_idx]);
       }
-      WriteWideScores(options.out, samples, catalog, matrix);
+      WriteWideScores(options.out, samples, catalog, matrix, progress.get());
     }
     remove_working.RemoveNow();
     WriteMetadata(options.out, samples.size(), samples.front().fid.has_value(),
@@ -645,6 +804,18 @@ int main(int argc, char** argv) {
                   compiled_catalog ? "compiled" : "manifest",
                   options.missing_frequency_policy, working_matrix_byte_ct,
                   catalog, stats);
+    if (progress) {
+      progress->Event(
+          "score", "complete",
+          {{"sample_rows", samples.size()},
+           {"score_columns", catalog.scores.size()},
+           {"pgen_inputs", inputs.size()},
+           {"scored_variants", stats.variant_ct},
+           {"weight_edges", stats.edge_ct},
+           {"sparse_variants", stats.sparse_variant_ct},
+           {"dense_variants", stats.dense_variant_ct},
+           {"imputed_values", stats.imputed_value_ct}});
+    }
     std::cerr << "wrote " << catalog.scores.size()
               << " named score columns for " << samples.size()
               << " sample rows from " << inputs.size() << " PGEN input(s); "

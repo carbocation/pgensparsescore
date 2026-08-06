@@ -181,9 +181,10 @@ VariantMap ReadVariantMap(const std::string& path) {
 
 Catalog CompileCatalog(const std::string& manifest_path,
                        const std::vector<Variant>& variants,
-                       const VariantMap* variant_map) {
-  const auto compiled = CompileSourceCatalog(manifest_path);
-  return MaterializeCompiledCatalog(compiled, variants, variant_map);
+                       const VariantMap* variant_map,
+                       ProgressReporter* progress) {
+  const auto compiled = CompileSourceCatalog(manifest_path, nullptr, progress);
+  return MaterializeCompiledCatalog(compiled, variants, variant_map, progress);
 }
 
 }  // namespace pgensparsescore

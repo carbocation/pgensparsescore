@@ -7,6 +7,7 @@
 #include "frequency.h"
 #include "mapped_matrix.h"
 #include "pgen_reader.h"
+#include "progress.h"
 #include "types.h"
 
 namespace pgensparsescore {
@@ -26,6 +27,7 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
                            const std::vector<Variant>& variants,
                            const FrequencyTable* frequencies,
                            MissingFrequencyPolicy missing_frequency_policy,
-                           PgenDosageReader* reader, MappedMatrix* matrix);
+                           PgenDosageReader* reader, MappedMatrix* matrix,
+                           ProgressReporter* progress = nullptr);
 
 }  // namespace pgensparsescore

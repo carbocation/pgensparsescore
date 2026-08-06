@@ -181,7 +181,8 @@ std::string ReadString(std::istream* input, const std::string& path) {
 
 CompiledCatalog CompileSourceCatalog(
     const std::string& manifest_path,
-    const std::unordered_set<std::string>* included_source_ids) {
+    const std::unordered_set<std::string>* included_source_ids,
+    ProgressReporter* progress) {
   struct ManifestRow {
     std::string score;
     std::string display_path;
@@ -224,10 +225,20 @@ CompiledCatalog CompileSourceCatalog(
   if (manifest.empty()) {
     throw std::runtime_error(manifest_path + " has no scores");
   }
+  if (progress) {
+    progress->Event("compile", "manifest_loaded",
+                    {{"score_files_total", manifest.size()},
+                     {"included_variants",
+                      included_source_ids ? included_source_ids->size() : 0}});
+  }
 
   CompiledCatalog result;
   result.scores.reserve(manifest.size());
   std::unordered_map<std::string, uint32_t> variant_by_source;
+  uint64_t input_weight_ct = 0;
+  uint64_t zero_weight_ct = 0;
+  uint64_t excluded_weight_ct = 0;
+  uint64_t duplicate_weight_ct = 0;
 
   for (uint32_t score_idx = 0; score_idx < manifest.size(); ++score_idx) {
     const auto& item = manifest[score_idx];
@@ -257,17 +268,33 @@ CompiledCatalog CompileSourceCatalog(
         continue;
       }
       ++info.input_weight_ct;
+      ++input_weight_ct;
+      if (progress && !(input_weight_ct % 1000000)) {
+        progress->MaybeEvent(
+            "compile", "parse_weights",
+            {{"score_files_processed", score_idx},
+             {"score_files_total", manifest.size()},
+             {"input_weights", input_weight_ct},
+             {"zero_weights", zero_weight_ct},
+             {"excluded_weights", excluded_weight_ct},
+             {"duplicate_weights", duplicate_weight_ct},
+             {"retained_weights", result.weight_ct},
+             {"unique_variants", result.variants.size()}},
+            {{"current_score", item.score}});
+      }
       const auto fields = SplitTabs(line);
       RequireFields(fields, max_idx, item.resolved_path, line_number);
       const double weight =
           ParseWeight(fields[weight_idx], item.resolved_path, line_number);
       if (weight == 0.0) {
         ++info.zero_weight_ct;
+        ++zero_weight_ct;
         continue;
       }
       const std::string& source_id = fields[snp_idx];
       if (included_source_ids && !included_source_ids->count(source_id)) {
         ++info.excluded_weight_ct;
+        ++excluded_weight_ct;
         continue;
       }
       const std::string& effect = fields[effect_idx];
@@ -280,6 +307,7 @@ CompiledCatalog CompileSourceCatalog(
       }
       if (!score_variants.insert(source_id).second) {
         ++info.duplicate_weight_ct;
+        ++duplicate_weight_ct;
       }
       const std::string allele0 = std::min(effect, other);
       const std::string allele1 = std::max(effect, other);
@@ -309,23 +337,78 @@ CompiledCatalog CompileSourceCatalog(
       ++result.weight_ct;
     }
     result.scores.push_back(std::move(info));
+    if (progress) {
+      progress->MaybeEvent(
+          "compile", "parse_weights",
+          {{"score_files_processed", score_idx + 1},
+           {"score_files_total", manifest.size()},
+           {"input_weights", input_weight_ct},
+           {"zero_weights", zero_weight_ct},
+           {"excluded_weights", excluded_weight_ct},
+           {"duplicate_weights", duplicate_weight_ct},
+           {"retained_weights", result.weight_ct},
+           {"unique_variants", result.variants.size()}},
+          {{"current_score", item.score}});
+    }
   }
 
+  if (progress) {
+    progress->Event(
+        "compile", "sort_weights",
+        {{"score_files_processed", result.scores.size()},
+         {"score_files_total", manifest.size()},
+         {"input_weights", input_weight_ct},
+         {"zero_weights", zero_weight_ct},
+         {"excluded_weights", excluded_weight_ct},
+         {"duplicate_weights", duplicate_weight_ct},
+         {"retained_weights", result.weight_ct},
+         {"unique_variants", result.variants.size()}});
+  }
+  uint64_t variants_sorted = 0;
+  uint64_t weights_sorted = 0;
   for (auto& variant : result.variants) {
     std::sort(variant.weights.begin(), variant.weights.end(),
               [](const CompiledWeight& lhs, const CompiledWeight& rhs) {
                 return lhs.score_idx < rhs.score_idx;
               });
+    ++variants_sorted;
+    weights_sorted += variant.weights.size();
+    if (progress && !(variants_sorted % 1000000)) {
+      progress->MaybeEvent(
+          "compile", "sort_weights",
+          {{"variants_sorted", variants_sorted},
+           {"variants_total", result.variants.size()},
+           {"weights_sorted", weights_sorted},
+           {"weights_total", result.weight_ct}});
+    }
+  }
+  if (progress) {
+    progress->Event("compile", "sort_variants",
+                    {{"variants_sorted", variants_sorted},
+                     {"variants_total", result.variants.size()},
+                     {"weights_sorted", weights_sorted},
+                     {"weights_total", result.weight_ct}});
   }
   std::sort(result.variants.begin(), result.variants.end(),
             [](const CompiledVariant& lhs, const CompiledVariant& rhs) {
               return lhs.source_id < rhs.source_id;
             });
+  if (progress) {
+    progress->Event("compile", "weights_ready",
+                    {{"score_files_processed", result.scores.size()},
+                     {"input_weights", input_weight_ct},
+                     {"zero_weights", zero_weight_ct},
+                     {"excluded_weights", excluded_weight_ct},
+                     {"duplicate_weights", duplicate_weight_ct},
+                     {"retained_weights", result.weight_ct},
+                     {"unique_variants", result.variants.size()}});
+  }
   return result;
 }
 
 void WriteCompiledCatalog(const std::string& path,
-                          const CompiledCatalog& catalog) {
+                          const CompiledCatalog& catalog,
+                          ProgressReporter* progress) {
   const std::string temporary = path + ".tmp";
   std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
   if (!output) {
@@ -345,6 +428,16 @@ void WriteCompiledCatalog(const std::string& path,
     WriteU64(&output, score.duplicate_weight_ct);
     WriteU64(&output, score.catalog_weight_ct);
   }
+  if (progress) {
+    progress->Event("compile", "serialize",
+                    {{"scores_written", catalog.scores.size()},
+                     {"variants_written", 0},
+                     {"variants_total", catalog.variants.size()},
+                     {"weights_written", 0},
+                     {"weights_total", catalog.weight_ct}});
+  }
+  uint64_t variants_written = 0;
+  uint64_t weights_written = 0;
   for (const auto& variant : catalog.variants) {
     WriteString(&output, variant.source_id);
     WriteString(&output, variant.allele0);
@@ -354,6 +447,19 @@ void WriteCompiledCatalog(const std::string& path,
       WriteU32(&output, weight.score_idx);
       WriteU8(&output, weight.effect_allele_idx);
       WriteDouble(&output, weight.weight);
+      ++weights_written;
+    }
+    ++variants_written;
+    if (progress && !(variants_written % 1000000)) {
+      const std::streampos position = output.tellp();
+      progress->MaybeEvent(
+          "compile", "serialize",
+          {{"scores_written", catalog.scores.size()},
+           {"variants_written", variants_written},
+           {"variants_total", catalog.variants.size()},
+           {"weights_written", weights_written},
+           {"weights_total", catalog.weight_ct},
+           {"output_bytes", position >= 0 ? static_cast<uint64_t>(position) : 0}});
     }
   }
   output.close();
@@ -361,9 +467,18 @@ void WriteCompiledCatalog(const std::string& path,
     throw std::runtime_error("cannot finish " + temporary);
   }
   std::filesystem::rename(temporary, path);
+  if (progress) {
+    progress->Event(
+        "compile", "serialization_complete",
+        {{"scores_written", catalog.scores.size()},
+         {"variants_written", variants_written},
+         {"weights_written", weights_written},
+         {"output_bytes", std::filesystem::file_size(path)}});
+  }
 }
 
-CompiledCatalog ReadCompiledCatalog(const std::string& path) {
+CompiledCatalog ReadCompiledCatalog(const std::string& path,
+                                    ProgressReporter* progress) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
     throw std::runtime_error("cannot open " + path);
@@ -425,6 +540,15 @@ CompiledCatalog ReadCompiledCatalog(const std::string& path) {
       ++result.weight_ct;
     }
     result.variants.push_back(std::move(variant));
+    if (progress && !((variant_idx + 1) % 1000000)) {
+      progress->MaybeEvent(
+          "score", "read_catalog",
+          {{"scores_read", score_ct},
+           {"variants_read", variant_idx + 1},
+           {"variants_total", variant_ct},
+           {"weights_read", result.weight_ct},
+           {"weights_total", expected_weight_ct}});
+    }
   }
   if (result.weight_ct != expected_weight_ct) {
     throw std::runtime_error(path + " weight count disagrees with its header");
@@ -433,12 +557,19 @@ CompiledCatalog ReadCompiledCatalog(const std::string& path) {
   if (input.read(&extra, 1)) {
     throw std::runtime_error(path + " has trailing data");
   }
+  if (progress) {
+    progress->Event("score", "catalog_loaded",
+                    {{"scores_read", score_ct},
+                     {"variants_read", variant_ct},
+                     {"weights_read", result.weight_ct}});
+  }
   return result;
 }
 
 Catalog MaterializeCompiledCatalog(const CompiledCatalog& compiled,
                                    const std::vector<Variant>& variants,
-                                   const VariantMap* variant_map) {
+                                   const VariantMap* variant_map,
+                                   ProgressReporter* progress) {
   std::unordered_map<std::string, uint32_t> variant_by_id;
   variant_by_id.reserve(variants.size());
   for (uint32_t idx = 0; idx < variants.size(); ++idx) {
@@ -463,7 +594,18 @@ Catalog MaterializeCompiledCatalog(const CompiledCatalog& compiled,
     score.ref_effect_intercept = 0.0;
   }
 
+  uint64_t source_variants_processed = 0;
+  uint64_t matched_weights = 0;
   for (const auto& source_variant : compiled.variants) {
+    ++source_variants_processed;
+    if (progress && !(source_variants_processed % 1000000)) {
+      progress->MaybeEvent(
+          "score", "materialize_catalog",
+          {{"source_variants_processed", source_variants_processed},
+           {"source_variants_total", compiled.variants.size()},
+           {"matched_variants", result.variants.size()},
+           {"matched_weights", matched_weights}});
+    }
     std::string target_id = source_variant.source_id;
     if (variant_map) {
       const auto mapping = variant_map->find(source_variant.source_id);
@@ -520,6 +662,7 @@ Catalog MaterializeCompiledCatalog(const CompiledCatalog& compiled,
             2.0 * weight.weight;
       }
       ++result.scores[weight.score_idx].matched_weight_ct;
+      ++matched_weights;
       materialized.edges.push_back(edge);
     }
     result.variants.push_back(std::move(materialized));
@@ -528,6 +671,12 @@ Catalog MaterializeCompiledCatalog(const CompiledCatalog& compiled,
             [](const VariantEdges& lhs, const VariantEdges& rhs) {
               return lhs.variant_idx < rhs.variant_idx;
             });
+  if (progress) {
+    progress->Event("score", "catalog_materialized",
+                    {{"source_variants_processed", compiled.variants.size()},
+                     {"matched_variants", result.variants.size()},
+                     {"matched_weights", matched_weights}});
+  }
   return result;
 }
 

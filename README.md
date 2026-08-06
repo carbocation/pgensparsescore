@@ -235,6 +235,23 @@ Additional outputs are:
 The JSON also records `variant_mapping_rows` (zero when `--variant-map` is not
 used), `pvar_variants_loaded`, and the storage mode of each input PGEN.
 
+## Progress reporting
+
+Both catalog compilation and scoring can write a structured progress log:
+
+```text
+--progress-jsonl run.progress.jsonl --progress-interval-seconds 30
+```
+
+The JSON Lines file is flushed after every event. It records the current phase,
+elapsed time, current and peak process memory when the operating system exposes
+them, and phase-specific counters. Compilation reports score files, input and
+retained weights, unique variants, sorting, and serialized bytes. Scoring
+reports catalog loading and matching, PVAR and frequency loading, sparse and
+dense decodes, weight edges, imputed values, and output rows. Phase-boundary
+events are always written; long phases also write events at the requested
+interval.
+
 The scorer uses a file-backed score-major matrix while applying variants,
 since that is the efficient update layout.  It transposes that working matrix
 in bounded-memory blocks when writing the sample-major table, then removes the

@@ -93,7 +93,8 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
                            const std::vector<Variant>& variants,
                            const FrequencyTable* frequencies,
                            MissingFrequencyPolicy missing_frequency_policy,
-                           PgenDosageReader* reader, MappedMatrix* matrix) {
+                           PgenDosageReader* reader, MappedMatrix* matrix,
+                           ProgressReporter* progress) {
   if (matrix->row_ct() != catalog.scores.size() ||
       matrix->column_ct() != reader->sample_ct()) {
     throw std::runtime_error("score matrix shape does not match catalog/PGEN");
@@ -149,6 +150,16 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
                        matrix);
     }
     ++processed;
+    if (progress && !(processed % 10000)) {
+      progress->MaybeEvent(
+          "score", "score_variants",
+          {{"variants_processed", processed},
+           {"variants_total", stats.variant_ct},
+           {"weight_edges_processed", stats.edge_ct},
+           {"sparse_variants", stats.sparse_variant_ct},
+           {"dense_variants", stats.dense_variant_ct},
+           {"imputed_values", stats.imputed_value_ct}});
+    }
     if (processed % 100000 == 0) {
       std::cerr << "processed " << processed << "/" << stats.variant_ct
                 << " scored variants\n";
@@ -163,6 +174,15 @@ ScoreRunStats ScoreCatalog(const Catalog& catalog,
     }
   }
   matrix->Flush();
+  if (progress) {
+    progress->Event(
+        "score", "pgen_complete",
+        {{"variants_processed", processed},
+         {"weight_edges_processed", stats.edge_ct},
+         {"sparse_variants", stats.sparse_variant_ct},
+         {"dense_variants", stats.dense_variant_ct},
+         {"imputed_values", stats.imputed_value_ct}});
+  }
   return stats;
 }
 

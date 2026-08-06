@@ -235,6 +235,7 @@ def main() -> None:
             str(compiled_catalog),
         )
         compiled_output = tmp / "compiled-result"
+        compiled_progress = tmp / "compiled-progress.jsonl"
         run(
             args.scorer,
             "--pfile-list",
@@ -247,6 +248,10 @@ def main() -> None:
             str(frequency_path),
             "--missing-freq",
             "error",
+            "--progress-jsonl",
+            str(compiled_progress),
+            "--progress-interval-seconds",
+            "1",
             "--out",
             str(compiled_output),
         )
@@ -273,6 +278,39 @@ def main() -> None:
             raise AssertionError("compiled catalog did not filter PVAR metadata")
         if compiled_metadata["pgen_storage_modes"] != ["standard", "standard"]:
             raise AssertionError("ordinary PGEN storage modes are absent from metadata")
+        progress_events = [
+            json.loads(line) for line in compiled_progress.read_text().splitlines()
+        ]
+        progress_phases = {event["phase"] for event in progress_events}
+        required_progress_phases = {
+            "start",
+            "catalog_loaded",
+            "variant_map_loaded",
+            "samples_loaded",
+            "pvar_loaded",
+            "catalog_materialized",
+            "frequencies_loaded",
+            "working_matrix_ready",
+            "pgen_start",
+            "pgen_complete",
+            "pgen_scored",
+            "write_scores",
+            "scores_written",
+            "complete",
+        }
+        if not required_progress_phases.issubset(progress_phases):
+            raise AssertionError(
+                "scoring progress lacks phases: "
+                f"{required_progress_phases - progress_phases}"
+            )
+        final_progress = progress_events[-1]
+        if (
+            final_progress["phase"] != "complete"
+            or final_progress["sample_rows"] != 4
+            or final_progress["score_columns"] != 2
+            or final_progress["pgen_inputs"] != 2
+        ):
+            raise AssertionError(f"invalid final scoring progress: {final_progress}")
 
         direct_catalog = tmp / "direct.catalog.bin"
         (tmp / "direct-score.tsv").write_text(

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "catalog.h"
+#include "progress.h"
 #include "types.h"
 
 namespace pgensparsescore {
@@ -32,12 +33,16 @@ struct CompiledCatalog {
 
 CompiledCatalog CompileSourceCatalog(
     const std::string& manifest_path,
-    const std::unordered_set<std::string>* included_source_ids = nullptr);
+    const std::unordered_set<std::string>* included_source_ids = nullptr,
+    ProgressReporter* progress = nullptr);
 void WriteCompiledCatalog(const std::string& path,
-                          const CompiledCatalog& catalog);
-CompiledCatalog ReadCompiledCatalog(const std::string& path);
+                          const CompiledCatalog& catalog,
+                          ProgressReporter* progress = nullptr);
+CompiledCatalog ReadCompiledCatalog(const std::string& path,
+                                    ProgressReporter* progress = nullptr);
 Catalog MaterializeCompiledCatalog(const CompiledCatalog& compiled,
                                    const std::vector<Variant>& variants,
-                                   const VariantMap* variant_map = nullptr);
+                                   const VariantMap* variant_map = nullptr,
+                                   ProgressReporter* progress = nullptr);
 
 }  // namespace pgensparsescore

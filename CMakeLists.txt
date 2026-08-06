@@ -63,6 +63,7 @@ add_library(pgensparsescore_lib
   src/mapped_matrix.cc
   src/pfile.cc
   src/pgen_reader.cc
+  src/progress.cc
   src/scorer.cc
 )
 target_include_directories(pgensparsescore_lib PUBLIC src)
@@ -83,6 +84,14 @@ if(BUILD_TESTING)
 
   find_package(Python3 COMPONENTS Interpreter)
   find_program(PLINK2_EXECUTABLE NAMES plink2)
+  if(Python3_Interpreter_FOUND)
+    add_test(
+      NAME progress_integration
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/tests/progress_test.py"
+              --scorer "$<TARGET_FILE:pgensparsescore>"
+    )
+  endif()
   if(Python3_Interpreter_FOUND AND PLINK2_EXECUTABLE)
     add_test(
       NAME pgen_integration
