@@ -103,6 +103,7 @@ pgensparsescore compile-fragment \
   --manifest fragment_00000.tsv \
   --variant-index selected.index.bin \
   --support-index reference.support.bin \
+  --minimum-supported-fraction 0.75 \
   --temp-dir work/fragment_00000 \
   --out fragment_00000.bin
 ```
@@ -117,9 +118,12 @@ whole fragment in memory. Within each output fragment, weights are stored by
 versions used a different layout and must be rebuilt. Each compiled fragment
 also writes a per-score QC table with row counts and L1/squared-weight mass,
 plus a compact variant bitset for constructing the exact union used by a set
-of fragments. When `--support-index`
-is supplied, the fragment retains the full score-level QC counts but stores
-only weights that can contribute in the reference dataset.
+of fragments. When `--support-index` is supplied, the fragment retains the
+full score-level QC counts but stores only weights that can contribute in the
+reference dataset. With `--minimum-supported-fraction`, a score is serialized
+only when the supported rows meet the requested fraction of its catalog rows.
+The QC table still lists every input score and reports row, absolute-weight,
+and squared-weight retention. Eligibility is based only on the row fraction.
 
 The fragment list contains one path per compiled fragment:
 
@@ -128,6 +132,18 @@ FRAGMENT
 fragments/fragment_00000.bin
 fragments/fragment_00001.bin
 ```
+
+The per-fragment variant bitsets can be combined without reading the weight
+records:
+
+```sh
+pgensparsescore merge-variant-bits \
+  --list variant_bits.tsv \
+  --out eligible_variants.bits
+```
+
+The list has one `VARIANT_BITS` path per row. The command verifies that every
+input was built against the same variant index.
 
 The optional score schema selects scores and fixes their requested row order
 and column names. Scores present in the fragments but absent from the schema

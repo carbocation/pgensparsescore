@@ -130,8 +130,13 @@ class FileCleanup {
   bool active_ = true;
 };
 
+double Fraction(double numerator, double denominator) {
+  return denominator == 0.0 ? 0.0 : numerator / denominator;
+}
+
 void WriteScoreQc(const std::string& path,
-                  const std::vector<FragmentScore>& scores) {
+                  const std::vector<FragmentScore>& scores,
+                  double minimum_supported_fraction) {
   const std::string temporary = path + ".tmp";
   FileCleanup cleanup(temporary);
   std::ofstream output(temporary, std::ios::trunc);
@@ -140,14 +145,22 @@ void WriteScoreQc(const std::string& path,
             "\tEXCLUDED_WEIGHTS\tDUPLICATE_WEIGHTS\tCATALOG_WEIGHTS"
             "\tREFERENCE_SUPPORTED_WEIGHTS\tREFERENCE_MISSING_VARIANT_WEIGHTS"
             "\tREFERENCE_MISSING_FREQUENCY_WEIGHTS\tNONZERO_WEIGHT_L1"
-            "\tNONZERO_WEIGHT_L2\tCATALOG_WEIGHT_L1\tCATALOG_WEIGHT_L2"
-            "\tREFERENCE_SUPPORTED_WEIGHT_L1\tREFERENCE_SUPPORTED_WEIGHT_L2\n";
+            "\tNONZERO_WEIGHT_L2_SQUARED\tCATALOG_WEIGHT_L1"
+            "\tCATALOG_WEIGHT_L2_SQUARED"
+            "\tREFERENCE_SUPPORTED_WEIGHT_L1"
+            "\tREFERENCE_SUPPORTED_WEIGHT_L2_SQUARED"
+            "\tREFERENCE_SUPPORTED_FRACTION"
+            "\tREFERENCE_SUPPORTED_L1_FRACTION"
+            "\tREFERENCE_SUPPORTED_L2_SQUARED_FRACTION\tSTATUS\n";
   output << std::setprecision(17);
   for (const auto& score : scores) {
     const auto& info = score.info;
     const uint64_t supported = info.catalog_weight_ct -
                                info.missing_variant_ct -
                                info.missing_frequency_ct;
+    const double supported_fraction =
+        Fraction(static_cast<double>(supported),
+                 static_cast<double>(info.catalog_weight_ct));
     output << score.score_id << '\t' << info.id << '\t' << info.path << '\t'
            << info.input_weight_ct << '\t' << info.zero_weight_ct << '\t'
            << info.excluded_weight_ct << '\t' << info.duplicate_weight_ct
@@ -156,7 +169,16 @@ void WriteScoreQc(const std::string& path,
            << '\t' << info.nonzero_weight_l1 << '\t' << info.nonzero_weight_l2
            << '\t' << info.catalog_weight_l1 << '\t'
            << info.catalog_weight_l2 << '\t' << info.supported_weight_l1
-           << '\t' << info.supported_weight_l2 << '\n';
+           << '\t' << info.supported_weight_l2 << '\t' << supported_fraction
+           << '\t'
+           << Fraction(info.supported_weight_l1, info.catalog_weight_l1)
+           << '\t'
+           << Fraction(info.supported_weight_l2, info.catalog_weight_l2)
+           << '\t'
+           << (supported_fraction >= minimum_supported_fraction
+                   ? "eligible"
+                   : "excluded_low_reference_coverage")
+           << '\n';
   }
   output.close();
   if (!output) throw std::runtime_error("cannot finish " + temporary);
@@ -328,6 +350,49 @@ std::vector<ManifestRow> ReadManifest(const std::string& path) {
   return result;
 }
 
+std::vector<std::string> ReadVariantBitsList(const std::string& path) {
+  LineReader reader(path);
+  std::string line;
+  if (!reader.GetLine(&line)) throw std::runtime_error(path + " is empty");
+  const Header header = MakeHeader(SplitTabs(line), path);
+  size_t bits_idx = static_cast<size_t>(-1);
+  for (const char* name : {"VARIANT_BITS", "PATH"}) {
+    const auto iter = header.find(name);
+    if (iter != header.end()) {
+      bits_idx = iter->second;
+      break;
+    }
+  }
+  if (bits_idx == static_cast<size_t>(-1)) {
+    throw std::runtime_error(path + " is missing VARIANT_BITS or PATH");
+  }
+  const std::filesystem::path base =
+      std::filesystem::absolute(path).parent_path();
+  std::unordered_set<std::string> seen;
+  std::vector<std::string> result;
+  uint64_t line_number = 1;
+  while (reader.GetLine(&line)) {
+    ++line_number;
+    if (line.empty()) continue;
+    const auto fields = SplitTabs(line);
+    if (fields.size() <= bits_idx || fields[bits_idx].empty()) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " has no variant-bitset path");
+    }
+    std::filesystem::path resolved(fields[bits_idx]);
+    if (resolved.is_relative()) resolved = base / resolved;
+    const std::string normalized = resolved.lexically_normal().string();
+    if (!seen.insert(normalized).second) {
+      throw std::runtime_error(path + " contains duplicate variant bitset " +
+                               fields[bits_idx]);
+    }
+    result.push_back(normalized);
+  }
+  if (result.empty()) throw std::runtime_error(path + " has no variant bitsets");
+  return result;
+}
+
 void FillHeader(unsigned char* header, const VariantIndex& index,
                 uint32_t tile_size, uint32_t tile_ct, uint32_t score_ct,
                 uint64_t weight_ct, uint64_t score_records_offset,
@@ -391,6 +456,17 @@ uint32_t Popcount(uint64_t value) {
 
 ScoreFragmentSummary CompileScoreFragment(
     const ScoreFragmentCompileOptions& options, ProgressReporter* progress) {
+  if (!std::isfinite(options.minimum_supported_fraction) ||
+      options.minimum_supported_fraction < 0.0 ||
+      options.minimum_supported_fraction > 1.0) {
+    throw std::runtime_error(
+        "minimum supported fraction must be from 0 through 1");
+  }
+  if (options.minimum_supported_fraction > 0.0 &&
+      options.support_index_path.empty()) {
+    throw std::runtime_error(
+        "minimum supported fraction requires a support index");
+  }
   if (std::filesystem::exists(options.output_path)) {
     throw std::runtime_error("score-fragment output already exists: " +
                              options.output_path);
@@ -448,7 +524,7 @@ ScoreFragmentSummary CompileScoreFragment(
   summary.variant_index_variant_ct = index.variant_ct();
   summary.tile_size = tile_size;
   summary.tile_ct = tile_ct;
-  summary.score_ct = static_cast<uint32_t>(manifest.size());
+  summary.input_score_ct = static_cast<uint32_t>(manifest.size());
 
   for (uint32_t manifest_idx = 0; manifest_idx < manifest.size();
        ++manifest_idx) {
@@ -543,8 +619,6 @@ ScoreFragmentSummary CompileScoreFragment(
       }
       info.supported_weight_l1 += absolute_weight;
       info.supported_weight_l2 += squared_weight;
-      referenced_variant_words[*ordinal / 64] |=
-          uint64_t{1} << (*ordinal % 64);
       const uint32_t block_idx = *ordinal / index.block_size();
       if (!buckets[block_idx]) {
         const auto path = temp_directory /
@@ -564,14 +638,14 @@ ScoreFragmentSummary CompileScoreFragment(
         throw std::runtime_error("cannot write score-fragment bucket");
       }
       ++bucket_weight_ct[block_idx];
-      ++summary.weight_ct;
+      ++summary.supported_weight_ct;
       if (progress && !(summary.input_weight_ct % 1000000)) {
         progress->MaybeEvent(
             "fragment", "parse_weights",
             {{"score_files_processed", manifest_idx},
              {"score_files_total", manifest.size()},
              {"input_weights", summary.input_weight_ct},
-             {"retained_weights", summary.weight_ct},
+             {"supported_weights", summary.supported_weight_ct},
              {"catalog_weights", summary.catalog_weight_ct},
              {"missing_variant_weights",
               summary.missing_variant_weight_ct},
@@ -590,7 +664,7 @@ ScoreFragmentSummary CompileScoreFragment(
           {{"score_files_processed", manifest_idx + 1},
            {"score_files_total", manifest.size()},
            {"input_weights", summary.input_weight_ct},
-           {"retained_weights", summary.weight_ct},
+           {"supported_weights", summary.supported_weight_ct},
            {"catalog_weights", summary.catalog_weight_ct},
            {"missing_variant_weights", summary.missing_variant_weight_ct},
            {"missing_frequency_weights",
@@ -608,6 +682,26 @@ ScoreFragmentSummary CompileScoreFragment(
     bucket.reset();
   }
 
+  std::vector<uint32_t> included_score_map(scores.size(), UINT32_MAX);
+  std::vector<FragmentScore> included_scores;
+  included_scores.reserve(scores.size());
+  for (uint32_t score_idx = 0; score_idx < scores.size(); ++score_idx) {
+    const auto& info = scores[score_idx].info;
+    const uint64_t supported = info.catalog_weight_ct -
+                               info.missing_variant_ct -
+                               info.missing_frequency_ct;
+    const double supported_fraction =
+        Fraction(static_cast<double>(supported),
+                 static_cast<double>(info.catalog_weight_ct));
+    if (supported_fraction < options.minimum_supported_fraction) continue;
+    included_score_map[score_idx] =
+        static_cast<uint32_t>(included_scores.size());
+    included_scores.push_back(scores[score_idx]);
+    summary.weight_ct += supported;
+  }
+  summary.score_ct = static_cast<uint32_t>(included_scores.size());
+  summary.excluded_score_ct = summary.input_score_ct - summary.score_ct;
+
   const std::string temporary_output = options.output_path + ".tmp";
   if (std::filesystem::exists(temporary_output)) {
     throw std::runtime_error("temporary fragment output already exists: " +
@@ -619,7 +713,7 @@ ScoreFragmentSummary CompileScoreFragment(
   std::vector<unsigned char> header(kHeaderBytes, 0);
   WriteBytes(&output, header.data(), header.size(), temporary_output);
   const uint64_t score_records_offset = Position(&output, temporary_output);
-  for (const auto& score : scores) {
+  for (const auto& score : included_scores) {
     WriteString(&output, score.score_id, temporary_output);
     WriteString(&output, score.info.id, temporary_output);
     WriteString(&output, score.info.path, temporary_output);
@@ -663,6 +757,20 @@ ScoreFragmentSummary CompileScoreFragment(
         throw std::runtime_error("invalid score-fragment bucket " +
                                  path.string());
       }
+      records.erase(
+          std::remove_if(records.begin(), records.end(),
+                         [&included_score_map](const BucketWeight& record) {
+                           const uint32_t score_idx =
+                               record.score_and_effect & kIndexMask;
+                           return included_score_map[score_idx] == UINT32_MAX;
+                         }),
+          records.end());
+      for (auto& record : records) {
+        const uint32_t old_score_idx = record.score_and_effect & kIndexMask;
+        record.score_and_effect =
+            included_score_map[old_score_idx] |
+            (record.score_and_effect & kRefEffectMask);
+      }
       std::stable_sort(
           records.begin(), records.end(),
           [tile_size](const BucketWeight& lhs, const BucketWeight& rhs) {
@@ -704,6 +812,8 @@ ScoreFragmentSummary CompileScoreFragment(
         }
         bitmap[local_variant_idx / 64] |= uint64_t{1}
                                                  << (local_variant_idx % 64);
+        referenced_variant_words[records[idx].ordinal / 64] |=
+            uint64_t{1} << (records[idx].ordinal % 64);
         const uint32_t score_idx = records[idx].score_and_effect & kIndexMask;
         if (score_idx != previous_score) {
           ++score_row_ct;
@@ -772,7 +882,7 @@ ScoreFragmentSummary CompileScoreFragment(
     throw std::runtime_error("fragment weight count changed during serialization");
   }
   if (summary.catalog_weight_ct !=
-      summary.weight_ct + summary.missing_variant_weight_ct +
+      summary.supported_weight_ct + summary.missing_variant_weight_ct +
           summary.missing_frequency_weight_ct) {
     throw std::runtime_error("fragment support counts do not add up");
   }
@@ -781,7 +891,7 @@ ScoreFragmentSummary CompileScoreFragment(
   for (const uint64_t offset : tile_offsets) {
     WriteU64(&output, offset, temporary_output);
   }
-  FillHeader(header.data(), index, tile_size, tile_ct, scores.size(),
+  FillHeader(header.data(), index, tile_size, tile_ct, included_scores.size(),
              summary.weight_ct, score_records_offset, tile_directory_offset,
              tile_data_offset, summary.output_bytes);
   output.seekp(0);
@@ -793,15 +903,19 @@ ScoreFragmentSummary CompileScoreFragment(
   for (const uint64_t word : referenced_variant_words) {
     summary.referenced_variant_ct += Popcount(word);
   }
-  WriteScoreQc(options.output_path + ".score_qc.tsv", scores);
+  WriteScoreQc(options.output_path + ".score_qc.tsv", scores,
+               options.minimum_supported_fraction);
   summary.variant_bitset_bytes = WriteVariantBits(
       options.output_path + ".variants.bits", index,
       referenced_variant_words, summary.referenced_variant_ct);
   if (progress) {
     progress->Event("fragment", "complete",
-                    {{"scores", summary.score_ct},
+                    {{"input_scores", summary.input_score_ct},
+                     {"scores", summary.score_ct},
+                     {"excluded_scores", summary.excluded_score_ct},
                      {"input_weights", summary.input_weight_ct},
-                    {"retained_weights", summary.weight_ct},
+                     {"supported_weights", summary.supported_weight_ct},
+                     {"retained_weights", summary.weight_ct},
                      {"catalog_weights", summary.catalog_weight_ct},
                      {"missing_variant_weights",
                       summary.missing_variant_weight_ct},
@@ -814,6 +928,107 @@ ScoreFragmentSummary CompileScoreFragment(
                      {"scoring_tiles", summary.tile_ct},
                      {"output_bytes", summary.output_bytes}});
   }
+  return summary;
+}
+
+VariantBitsMergeSummary MergeVariantBits(const std::string& list_path,
+                                         const std::string& output_path) {
+  if (std::filesystem::exists(output_path)) {
+    throw std::runtime_error("variant-bitset output already exists: " +
+                             output_path);
+  }
+  const auto paths = ReadVariantBitsList(list_path);
+  VariantBitsMergeSummary summary;
+  summary.input_ct = paths.size();
+  uint64_t signature_lo = 0;
+  uint64_t signature_hi = 0;
+  std::vector<uint64_t> merged;
+  for (size_t path_idx = 0; path_idx < paths.size(); ++path_idx) {
+    const std::string& path = paths[path_idx];
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("cannot open " + path);
+    unsigned char header[kVariantBitsHeaderBytes];
+    input.read(reinterpret_cast<char*>(header), sizeof(header));
+    if (!input || std::memcmp(header, kVariantBitsMagic,
+                              sizeof(kVariantBitsMagic)) ||
+        GetU32(header + 8) != kVariantBitsVersion ||
+        GetU32(header + 12) != kVariantBitsHeaderBytes) {
+      throw std::runtime_error(path + " is not a supported variant bitset");
+    }
+    const uint64_t variant_ct = GetU64(header + 16);
+    const uint64_t current_signature_lo = GetU64(header + 24);
+    const uint64_t current_signature_hi = GetU64(header + 32);
+    const uint64_t stated_referenced_ct = GetU64(header + 40);
+    const uint64_t stated_file_bytes = GetU64(header + 48);
+    const uint64_t word_ct = (variant_ct + 63) / 64;
+    const uint64_t expected_file_bytes =
+        kVariantBitsHeaderBytes + word_ct * 8;
+    if (!variant_ct || stated_file_bytes != expected_file_bytes ||
+        std::filesystem::file_size(path) != expected_file_bytes) {
+      throw std::runtime_error(path + " has inconsistent dimensions");
+    }
+    if (!path_idx) {
+      summary.variant_ct = variant_ct;
+      signature_lo = current_signature_lo;
+      signature_hi = current_signature_hi;
+      merged.assign(word_ct, 0);
+    } else if (variant_ct != summary.variant_ct ||
+               current_signature_lo != signature_lo ||
+               current_signature_hi != signature_hi) {
+      throw std::runtime_error(
+          path + " was built for a different variant index");
+    }
+    uint64_t observed_referenced_ct = 0;
+    constexpr uint64_t kReadWordCt = 65536;
+    std::vector<unsigned char> bytes(kReadWordCt * 8);
+    for (uint64_t word_begin = 0; word_begin < word_ct;
+         word_begin += kReadWordCt) {
+      const uint64_t current_word_ct =
+          std::min(kReadWordCt, word_ct - word_begin);
+      input.read(reinterpret_cast<char*>(bytes.data()),
+                 static_cast<std::streamsize>(current_word_ct * 8));
+      if (!input) throw std::runtime_error(path + " is truncated");
+      for (uint64_t local_idx = 0; local_idx < current_word_ct; ++local_idx) {
+        const uint64_t word_idx = word_begin + local_idx;
+        const uint64_t word = GetU64(bytes.data() + local_idx * 8);
+        if (word_idx + 1 == word_ct && variant_ct % 64 &&
+            (word >> (variant_ct % 64))) {
+          throw std::runtime_error(path +
+                                   " sets bits beyond its variant count");
+        }
+        observed_referenced_ct += Popcount(word);
+        merged[word_idx] |= word;
+      }
+    }
+    if (observed_referenced_ct != stated_referenced_ct ||
+        input.peek() != std::ifstream::traits_type::eof()) {
+      throw std::runtime_error(path + " has inconsistent referenced variants");
+    }
+  }
+  for (const uint64_t word : merged) {
+    summary.referenced_variant_ct += Popcount(word);
+  }
+  summary.output_bytes =
+      kVariantBitsHeaderBytes + static_cast<uint64_t>(merged.size()) * 8;
+
+  const std::string temporary = output_path + ".tmp";
+  FileCleanup cleanup(temporary);
+  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+  if (!output) throw std::runtime_error("cannot create " + temporary);
+  WriteBytes(&output, kVariantBitsMagic, sizeof(kVariantBitsMagic), temporary);
+  WriteU32(&output, kVariantBitsVersion, temporary);
+  WriteU32(&output, kVariantBitsHeaderBytes, temporary);
+  WriteU64(&output, summary.variant_ct, temporary);
+  WriteU64(&output, signature_lo, temporary);
+  WriteU64(&output, signature_hi, temporary);
+  WriteU64(&output, summary.referenced_variant_ct, temporary);
+  WriteU64(&output, summary.output_bytes, temporary);
+  WriteU64(&output, 0, temporary);
+  for (const uint64_t word : merged) WriteU64(&output, word, temporary);
+  output.close();
+  if (!output) throw std::runtime_error("cannot finish " + temporary);
+  std::filesystem::rename(temporary, output_path);
+  cleanup.Release();
   return summary;
 }
 

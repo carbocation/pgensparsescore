@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -87,6 +90,11 @@ struct FragmentCompileOptions {
   std::string progress_interval_seconds;
 };
 
+struct VariantBitsMergeOptions {
+  std::string list_path;
+  std::string output_path;
+};
+
 struct SupportIndexOptions {
   pgensparsescore::SupportIndexBuildOptions build;
   std::string progress_jsonl;
@@ -136,9 +144,12 @@ void PrintUsage(std::ostream& stream) {
       "  pgensparsescore compile-fragment --manifest FILE \\\n"
       "                          --variant-index FILE \\\n"
       "                          [--support-index FILE] [--temp-dir DIR] \\\n"
+      "                          [--minimum-supported-fraction X] \\\n"
       "                          [--progress-jsonl FILE] \\\n"
       "                          [--progress-interval-seconds N] \\\n"
       "                          --out SCORES.fragment.bin\n"
+      "  pgensparsescore merge-variant-bits --list FILE \\\n"
+      "                          --out VARIANTS.bits\n"
       "  pgensparsescore compile --manifest FILE [--variant-map FILE] \\\n"
       "                          [--progress-jsonl FILE] \\\n"
       "                          [--progress-interval-seconds N] \\\n"
@@ -224,6 +235,17 @@ uint32_t ParsePositiveU32(const std::string& value,
   if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() ||
       !result) {
     throw std::runtime_error(argument + " must be a positive integer");
+  }
+  return result;
+}
+
+double ParseFraction(const std::string& value, const std::string& argument) {
+  char* end = nullptr;
+  errno = 0;
+  const double result = std::strtod(value.c_str(), &end);
+  if (errno || end != value.c_str() + value.size() || !std::isfinite(result) ||
+      result < 0.0 || result > 1.0) {
+    throw std::runtime_error(argument + " must be a number from 0 through 1");
   }
   return result;
 }
@@ -348,10 +370,12 @@ FragmentCompileOptions ParseFragmentCompileOptions(int argc, char** argv) {
     std::exit(0);
   }
   FragmentCompileOptions options;
+  std::string minimum_supported_fraction;
   std::unordered_map<std::string, std::string*> destinations{
       {"--manifest", &options.build.manifest_path},
       {"--variant-index", &options.build.variant_index_path},
       {"--support-index", &options.build.support_index_path},
+      {"--minimum-supported-fraction", &minimum_supported_fraction},
       {"--temp-dir", &options.build.temporary_directory},
       {"--progress-jsonl", &options.progress_jsonl},
       {"--progress-interval-seconds", &options.progress_interval_seconds},
@@ -382,6 +406,43 @@ FragmentCompileOptions ParseFragmentCompileOptions(int argc, char** argv) {
   }
   if (!options.progress_interval_seconds.empty()) {
     ParseProgressInterval(options.progress_interval_seconds);
+  }
+  if (!minimum_supported_fraction.empty()) {
+    options.build.minimum_supported_fraction = ParseFraction(
+        minimum_supported_fraction, "--minimum-supported-fraction");
+  }
+  if (options.build.minimum_supported_fraction > 0.0 &&
+      options.build.support_index_path.empty()) {
+    throw std::runtime_error(
+        "--minimum-supported-fraction requires --support-index");
+  }
+  return options;
+}
+
+VariantBitsMergeOptions ParseVariantBitsMergeOptions(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[2]) == "--help") {
+    PrintUsage(std::cout);
+    std::exit(0);
+  }
+  VariantBitsMergeOptions options;
+  std::unordered_map<std::string, std::string*> destinations{
+      {"--list", &options.list_path},
+      {"--out", &options.output_path},
+  };
+  for (int idx = 2; idx < argc; ++idx) {
+    const std::string key(argv[idx]);
+    const auto iter = destinations.find(key);
+    if (iter == destinations.end()) {
+      throw std::runtime_error("unknown merge-variant-bits argument: " + key);
+    }
+    if (++idx >= argc) throw std::runtime_error("missing value after " + key);
+    if (!iter->second->empty()) {
+      throw std::runtime_error("argument supplied twice: " + key);
+    }
+    *iter->second = argv[idx];
+  }
+  if (options.list_path.empty() || options.output_path.empty()) {
+    throw std::runtime_error("merge-variant-bits requires --list and --out");
   }
   return options;
 }
@@ -886,10 +947,11 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
     output << "INDEX\tSCORE\tINPUT_WEIGHTS\tZERO_WEIGHTS"
               "\tEXCLUDED_WEIGHTS\tDUPLICATE_WEIGHTS\tCATALOG_WEIGHTS\tMATCHED_WEIGHTS"
               "\tMISSING_VARIANTS\tMISSING_FREQUENCIES\tSCORED_WEIGHTS"
-              "\tALT_EFFECTS\tREF_EFFECTS\tNONZERO_WEIGHT_L1\tNONZERO_WEIGHT_L2"
-              "\tCATALOG_WEIGHT_L1\tCATALOG_WEIGHT_L2"
+              "\tALT_EFFECTS\tREF_EFFECTS\tNONZERO_WEIGHT_L1"
+              "\tNONZERO_WEIGHT_L2_SQUARED\tCATALOG_WEIGHT_L1"
+              "\tCATALOG_WEIGHT_L2_SQUARED"
               "\tREFERENCE_SUPPORTED_WEIGHT_L1"
-              "\tREFERENCE_SUPPORTED_WEIGHT_L2\tREF_INTERCEPT\n";
+              "\tREFERENCE_SUPPORTED_WEIGHT_L2_SQUARED\tREF_INTERCEPT\n";
     for (uint32_t idx = 0; idx < catalog.scores.size(); ++idx) {
       const auto& score = catalog.scores[idx];
       output << idx << '\t' << score.id << '\t' << score.input_weight_ct << '\t'
@@ -1402,9 +1464,16 @@ int FragmentCompileMain(int argc, char** argv) {
            << summary.variant_index_variant_ct << ",\n"
            << "  \"tile_size\": " << summary.tile_size << ",\n"
            << "  \"tiles\": " << summary.tile_ct << ",\n"
+           << "  \"input_scores\": " << summary.input_score_ct << ",\n"
            << "  \"scores\": " << summary.score_ct << ",\n"
+           << "  \"excluded_scores\": " << summary.excluded_score_ct
+           << ",\n"
+           << "  \"minimum_supported_fraction\": "
+           << options.build.minimum_supported_fraction << ",\n"
            << "  \"input_weights\": " << summary.input_weight_ct << ",\n"
            << "  \"catalog_weights\": " << summary.catalog_weight_ct
+           << ",\n"
+           << "  \"supported_weights\": " << summary.supported_weight_ct
            << ",\n"
            << "  \"weights\": " << summary.weight_ct << ",\n"
            << "  \"zero_weights\": " << summary.zero_weight_ct << ",\n"
@@ -1436,8 +1505,20 @@ int FragmentCompileMain(int argc, char** argv) {
            << "}\n";
   metadata.close();
   if (!metadata) throw std::runtime_error("cannot finish fragment metadata");
-  std::cerr << "built score fragment with " << summary.score_ct
-            << " scores and " << summary.weight_ct << " nonzero weights\n";
+  std::cerr << "built score fragment with " << summary.score_ct << " of "
+            << summary.input_score_ct << " scores and " << summary.weight_ct
+            << " retained nonzero weights\n";
+  return 0;
+}
+
+int VariantBitsMergeMain(int argc, char** argv) {
+  const VariantBitsMergeOptions options =
+      ParseVariantBitsMergeOptions(argc, argv);
+  const auto summary = pgensparsescore::MergeVariantBits(
+      options.list_path, options.output_path);
+  std::cerr << "merged " << summary.input_ct << " variant bitsets into "
+            << summary.referenced_variant_ct << " of " << summary.variant_ct
+            << " variants\n";
   return 0;
 }
 
@@ -1450,6 +1531,9 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && std::string(argv[1]) == "compile-fragment") {
       return FragmentCompileMain(argc, argv);
+    }
+    if (argc > 1 && std::string(argv[1]) == "merge-variant-bits") {
+      return VariantBitsMergeMain(argc, argv);
     }
     if (argc > 1 && std::string(argv[1]) == "build-support-index") {
       return SupportIndexMain(argc, argv);

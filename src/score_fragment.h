@@ -18,6 +18,7 @@ struct ScoreFragmentCompileOptions {
   std::string support_index_path;
   std::string temporary_directory;
   std::string output_path;
+  double minimum_supported_fraction = 0.0;
 };
 
 struct FragmentScore {
@@ -29,8 +30,11 @@ struct ScoreFragmentSummary {
   uint64_t variant_index_variant_ct = 0;
   uint32_t tile_size = 0;
   uint32_t tile_ct = 0;
+  uint32_t input_score_ct = 0;
   uint32_t score_ct = 0;
+  uint32_t excluded_score_ct = 0;
   uint64_t catalog_weight_ct = 0;
+  uint64_t supported_weight_ct = 0;
   uint64_t weight_ct = 0;
   uint64_t input_weight_ct = 0;
   uint64_t zero_weight_ct = 0;
@@ -46,6 +50,16 @@ struct ScoreFragmentSummary {
 ScoreFragmentSummary CompileScoreFragment(
     const ScoreFragmentCompileOptions& options,
     ProgressReporter* progress = nullptr);
+
+struct VariantBitsMergeSummary {
+  uint64_t input_ct = 0;
+  uint64_t variant_ct = 0;
+  uint64_t referenced_variant_ct = 0;
+  uint64_t output_bytes = 0;
+};
+
+VariantBitsMergeSummary MergeVariantBits(const std::string& list_path,
+                                         const std::string& output_path);
 
 struct ScoreMajorFragmentEdge {
   uint32_t local_variant_idx = 0;

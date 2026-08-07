@@ -505,8 +505,10 @@ void TestScoreFragment() {
   fragment_options.output_path = fragment_path.string();
   const auto summary =
       pgensparsescore::CompileScoreFragment(fragment_options);
-  if (summary.score_ct != 2 || summary.catalog_weight_ct != 4 ||
-      summary.weight_ct != 2 || summary.missing_variant_weight_ct != 1 ||
+  if (summary.input_score_ct != 2 || summary.score_ct != 2 ||
+      summary.excluded_score_ct != 0 || summary.catalog_weight_ct != 4 ||
+      summary.supported_weight_ct != 2 || summary.weight_ct != 2 ||
+      summary.missing_variant_weight_ct != 1 ||
       summary.missing_frequency_weight_ct != 1 ||
       summary.input_weight_ct != 6 || summary.zero_weight_ct != 1 ||
       summary.excluded_weight_ct != 1 || summary.duplicate_weight_ct != 1 ||
@@ -553,6 +555,59 @@ void TestScoreFragment() {
       reader.scores()[1].info.catalog_weight_ct != 1 ||
       reader.scores()[1].info.missing_variant_ct != 1) {
     throw std::runtime_error("projected fragment QC metadata is wrong");
+  }
+
+  const auto screened_fragment_path = directory / "screened.fragment.bin";
+  fragment_options.output_path = screened_fragment_path.string();
+  fragment_options.minimum_supported_fraction = 0.5;
+  const auto screened_summary =
+      pgensparsescore::CompileScoreFragment(fragment_options);
+  if (screened_summary.input_score_ct != 2 ||
+      screened_summary.score_ct != 1 ||
+      screened_summary.excluded_score_ct != 1 ||
+      screened_summary.supported_weight_ct != 2 ||
+      screened_summary.weight_ct != 2 ||
+      screened_summary.referenced_variant_ct != 1) {
+    throw std::runtime_error("screened score-fragment summary is wrong");
+  }
+  pgensparsescore::ScoreFragmentReader screened_reader(
+      screened_fragment_path.string());
+  if (screened_reader.scores().size() != 1 ||
+      screened_reader.scores()[0].score_id != "source:a" ||
+      screened_reader.weight_ct() != 2) {
+    throw std::runtime_error("screened score-fragment contents are wrong");
+  }
+  {
+    std::ifstream input(screened_fragment_path.string() + ".score_qc.tsv");
+    const std::string contents((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+    if (contents.find("REFERENCE_SUPPORTED_L1_FRACTION") ==
+            std::string::npos ||
+        contents.find("REFERENCE_SUPPORTED_L2_SQUARED_FRACTION") ==
+            std::string::npos ||
+        contents.find("source:a\tsource__a") == std::string::npos ||
+        contents.find("eligible") == std::string::npos ||
+        contents.find("excluded_low_reference_coverage") ==
+            std::string::npos) {
+      throw std::runtime_error("screened score-fragment QC is wrong");
+    }
+  }
+  const auto bits_list = directory / "variant_bits.tsv";
+  {
+    std::ofstream output(bits_list);
+    output << "VARIANT_BITS\n"
+           << fragment_path.filename().string() << ".variants.bits\n"
+           << screened_fragment_path.filename().string()
+           << ".variants.bits\n";
+  }
+  const auto merged_bits = directory / "merged.variants.bits";
+  const auto merged_summary = pgensparsescore::MergeVariantBits(
+      bits_list.string(), merged_bits.string());
+  if (merged_summary.input_ct != 2 || merged_summary.variant_ct != 3 ||
+      merged_summary.referenced_variant_ct != 1 ||
+      merged_summary.output_bytes != 72 ||
+      std::filesystem::file_size(merged_bits) != 72) {
+    throw std::runtime_error("merged variant bitset is wrong");
   }
   std::filesystem::remove_all(directory);
 }
