@@ -18,6 +18,7 @@ enum class VariantSupport : uint8_t {
 struct SupportIndexBuildOptions {
   std::string variant_index_path;
   std::string pvar_path;
+  std::string pvar_list_path;
   std::string frequency_path;
   std::string output_path;
 };
@@ -27,6 +28,7 @@ struct SupportIndexSummary {
   uint64_t missing_variant_ct = 0;
   uint64_t missing_frequency_ct = 0;
   uint64_t usable_variant_ct = 0;
+  uint64_t pvar_input_ct = 0;
   uint64_t pvar_row_ct = 0;
   uint64_t frequency_row_ct = 0;
   uint64_t output_bytes = 0;

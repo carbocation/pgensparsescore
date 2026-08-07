@@ -12,10 +12,12 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 #include "fragment_scorer.h"
 #include "frequency.h"
+#include "io.h"
 
 namespace pgensparsescore {
 namespace {
@@ -76,6 +78,53 @@ class RemoveFileOnExit {
   bool active_ = true;
 };
 
+std::vector<std::string> ReadPvarList(const std::string& path) {
+  LineReader reader(path);
+  std::string line;
+  if (!reader.GetLine(&line)) {
+    throw std::runtime_error(path + " is empty");
+  }
+  const auto header = SplitTabs(line);
+  size_t pvar_idx = header.size();
+  for (size_t idx = 0; idx < header.size(); ++idx) {
+    std::string name = header[idx];
+    if (!name.empty() && name.front() == '#') name.erase(0, 1);
+    if (name == "PVAR") {
+      if (pvar_idx != header.size()) {
+        throw std::runtime_error(path + " has duplicate PVAR columns");
+      }
+      pvar_idx = idx;
+    }
+  }
+  if (pvar_idx == header.size()) {
+    throw std::runtime_error(path + " is missing column PVAR");
+  }
+  const auto base = std::filesystem::absolute(path).parent_path();
+  std::vector<std::string> result;
+  std::unordered_set<std::string> seen;
+  uint64_t line_number = 1;
+  while (reader.GetLine(&line)) {
+    ++line_number;
+    if (line.empty()) continue;
+    const auto fields = SplitTabs(line);
+    if (fields.size() <= pvar_idx || fields[pvar_idx].empty()) {
+      throw std::runtime_error(path + ": line " +
+                               std::to_string(line_number) +
+                               " has no PVAR path");
+    }
+    std::filesystem::path resolved(fields[pvar_idx]);
+    if (resolved.is_relative()) resolved = base / resolved;
+    const std::string normalized = resolved.lexically_normal().string();
+    if (!seen.insert(normalized).second) {
+      throw std::runtime_error(path + " contains duplicate PVAR " +
+                               fields[pvar_idx]);
+    }
+    result.push_back(normalized);
+  }
+  if (result.empty()) throw std::runtime_error(path + " has no PVAR inputs");
+  return result;
+}
+
 }  // namespace
 
 SupportIndexSummary BuildSupportIndex(const SupportIndexBuildOptions& options,
@@ -85,23 +134,36 @@ SupportIndexSummary BuildSupportIndex(const SupportIndexBuildOptions& options,
                              options.output_path);
   }
   VariantIndex index(options.variant_index_path);
+  std::vector<std::string> pvar_paths;
+  if (!options.pvar_path.empty()) {
+    pvar_paths.push_back(options.pvar_path);
+  } else if (!options.pvar_list_path.empty()) {
+    pvar_paths = ReadPvarList(options.pvar_list_path);
+  } else {
+    throw std::runtime_error("support index has no PVAR input");
+  }
   if (progress) {
     progress->Event("support_index", "start",
-                    {{"variant_index_variants", index.variant_ct()}},
+                    {{"variant_index_variants", index.variant_ct()},
+                     {"pvar_inputs", pvar_paths.size()}},
                     {{"variant_index", options.variant_index_path},
                      {"pvar", options.pvar_path},
+                     {"pvar_list", options.pvar_list_path},
                      {"frequencies", options.frequency_path},
                      {"output", options.output_path}});
   }
   std::vector<IndexedVariantLocation> locations(index.variant_ct());
-  const auto pvar =
-      AddIndexedPvar(options.pvar_path, 0, index, &locations, progress);
+  SupportIndexSummary summary;
+  summary.variant_ct = index.variant_ct();
+  summary.pvar_input_ct = pvar_paths.size();
+  for (uint32_t input_idx = 0; input_idx < pvar_paths.size(); ++input_idx) {
+    const auto pvar = AddIndexedPvar(pvar_paths[input_idx], input_idx, index,
+                                     &locations, progress);
+    summary.pvar_row_ct += pvar.row_ct;
+  }
   const auto frequencies = ReadIndexedFrequencyTable(
       options.frequency_path, index, progress);
   std::vector<uint8_t> states(index.variant_ct());
-  SupportIndexSummary summary;
-  summary.variant_ct = index.variant_ct();
-  summary.pvar_row_ct = pvar.row_ct;
   summary.frequency_row_ct = frequencies.matched_row_ct;
   for (uint64_t ordinal = 0; ordinal < index.variant_ct(); ++ordinal) {
     VariantSupport state = VariantSupport::kUsable;
@@ -150,6 +212,7 @@ SupportIndexSummary BuildSupportIndex(const SupportIndexBuildOptions& options,
          {"missing_variants", summary.missing_variant_ct},
          {"missing_frequencies", summary.missing_frequency_ct},
          {"usable_variants", summary.usable_variant_ct},
+         {"pvar_inputs", summary.pvar_input_ct},
          {"pvar_rows", summary.pvar_row_ct},
          {"frequency_rows", summary.frequency_row_ct},
          {"output_bytes", summary.output_bytes}});

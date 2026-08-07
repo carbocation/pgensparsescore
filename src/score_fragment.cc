@@ -1303,4 +1303,74 @@ ScoreFragmentTile ScoreFragmentReader::OpenTile(uint32_t tile_idx) const {
   return result;
 }
 
+ScoreFragmentSupportSummary MeasureScoreFragmentSupport(
+    const ScoreFragmentReader& fragment, const SupportIndex& support) {
+  if (fragment.variant_ct() != support.variant_ct() ||
+      fragment.signature_lo() != support.signature_lo() ||
+      fragment.signature_hi() != support.signature_hi()) {
+    throw std::runtime_error(
+        "score fragment and support index describe different variant indexes");
+  }
+  ScoreFragmentSupportSummary result;
+  result.variant_ct = fragment.variant_ct();
+  result.score_ct = fragment.scores().size();
+  result.scores.reserve(fragment.scores().size());
+  for (const auto& score : fragment.scores()) {
+    ScoreFragmentSupportRow row;
+    row.score_id = score.score_id;
+    row.column_name = score.info.id;
+    row.reference_weight_ct =
+        score.info.catalog_weight_ct - score.info.missing_variant_ct -
+        score.info.missing_frequency_ct;
+    row.reference_weight_l1 = score.info.supported_weight_l1;
+    row.reference_weight_l2_squared = score.info.supported_weight_l2;
+    result.reference_weight_ct += row.reference_weight_ct;
+    result.scores.push_back(std::move(row));
+  }
+  std::vector<uint64_t> observed_reference_counts(result.scores.size(), 0);
+  std::vector<double> observed_reference_l1(result.scores.size(), 0.0);
+  std::vector<double> observed_reference_l2_squared(result.scores.size(), 0.0);
+  for (uint32_t tile_idx = 0; tile_idx < fragment.tile_ct(); ++tile_idx) {
+    const auto tile = fragment.OpenTile(tile_idx);
+    for (const auto& score_row : tile.rows()) {
+      auto& output = result.scores.at(score_row.local_score_idx());
+      for (uint32_t edge_idx = 0; edge_idx < score_row.edge_ct(); ++edge_idx) {
+        const auto edge = score_row.edge(edge_idx);
+        const uint32_t ordinal = tile.first_ordinal() + edge.local_variant_idx;
+        const double weight = std::abs(edge.beta_alt);
+        ++observed_reference_counts[score_row.local_score_idx()];
+        observed_reference_l1[score_row.local_score_idx()] += weight;
+        observed_reference_l2_squared[score_row.local_score_idx()] +=
+            weight * weight;
+        if (support.state(ordinal) != VariantSupport::kUsable) continue;
+        ++output.available_weight_ct;
+        output.available_weight_l1 += weight;
+        output.available_weight_l2_squared += weight * weight;
+        ++result.available_weight_ct;
+      }
+    }
+  }
+  for (uint32_t score_idx = 0; score_idx < result.scores.size(); ++score_idx) {
+    const auto& row = result.scores[score_idx];
+    auto close = [](double observed, double expected) {
+      return std::abs(observed - expected) <=
+             1e-10 * std::max(1.0, std::abs(expected));
+    };
+    if (row.available_weight_ct > row.reference_weight_ct ||
+        observed_reference_counts[score_idx] != row.reference_weight_ct ||
+        !close(observed_reference_l1[score_idx], row.reference_weight_l1) ||
+        !close(observed_reference_l2_squared[score_idx],
+               row.reference_weight_l2_squared)) {
+      throw std::runtime_error(
+          "score-fragment support accounting is inconsistent for " +
+          row.score_id);
+    }
+  }
+  if (result.reference_weight_ct != fragment.weight_ct()) {
+    throw std::runtime_error(
+        "score-fragment support report has inconsistent reference weights");
+  }
+  return result;
+}
+
 }  // namespace pgensparsescore

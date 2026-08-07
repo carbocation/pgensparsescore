@@ -127,4 +127,28 @@ class ScoreFragmentReader {
   std::unique_ptr<Impl> impl_;
 };
 
+struct ScoreFragmentSupportRow {
+  std::string score_id;
+  std::string column_name;
+  uint64_t reference_weight_ct = 0;
+  uint64_t available_weight_ct = 0;
+  double reference_weight_l1 = 0.0;
+  double available_weight_l1 = 0.0;
+  double reference_weight_l2_squared = 0.0;
+  double available_weight_l2_squared = 0.0;
+};
+
+struct ScoreFragmentSupportSummary {
+  uint64_t variant_ct = 0;
+  uint32_t score_ct = 0;
+  uint64_t reference_weight_ct = 0;
+  uint64_t available_weight_ct = 0;
+  std::vector<ScoreFragmentSupportRow> scores;
+};
+
+class SupportIndex;
+
+ScoreFragmentSupportSummary MeasureScoreFragmentSupport(
+    const ScoreFragmentReader& fragment, const SupportIndex& support);
+
 }  // namespace pgensparsescore

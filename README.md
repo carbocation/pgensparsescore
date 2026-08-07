@@ -92,7 +92,9 @@ pgensparsescore build-support-index \
 
 The support index classifies each selected variant as usable, absent from the
 PVAR, or lacking a usable frequency. It is tied to the variant index and is
-small enough to memory-map.
+small enough to memory-map. For chromosome-partitioned data, replace `--pvar`
+with `--pvar-list pvars.tsv`; the list has a `PVAR` header and one path per
+row.
 
 Divide the score manifest into groups with similar estimated nonzero-weight
 counts. Each group is compiled independently and can run on a different
@@ -124,6 +126,20 @@ reference dataset. With `--minimum-supported-fraction`, a score is serialized
 only when the supported rows meet the requested fraction of its catalog rows.
 The QC table still lists every input score and reports row, absolute-weight,
 and squared-weight retention. Eligibility is based only on the row fraction.
+
+An existing fragment can be measured against another support index without
+recompiling its source scores:
+
+```sh
+pgensparsescore report-fragment-support \
+  --fragment fragment_00000.bin \
+  --support-index target.support.bin \
+  --out fragment_00000.availability.tsv
+```
+
+The report gives target-dataset row, absolute-weight, and squared-weight
+availability for every score in the fragment. This scans the compiled weight
+records and does not read genotype data.
 
 The fragment list contains one path per compiled fragment:
 

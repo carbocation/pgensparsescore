@@ -436,14 +436,26 @@ void TestScoreFragment() {
   index_options.output_path = index_path.string();
   pgensparsescore::BuildVariantIndex(index_options);
 
-  const auto pvar_path = directory / "reference.pvar";
+  const auto pvar1_path = directory / "reference-chr1.pvar";
+  const auto pvar2_path = directory / "reference-chr2.pvar";
+  const auto pvar_list_path = directory / "reference-pvars.tsv";
   const auto frequency_path = directory / "reference.acount";
   const auto support_path = directory / "reference.support.bin";
   {
-    std::ofstream output(pvar_path);
+    std::ofstream output(pvar1_path);
     output << "#CHROM\tPOS\tID\tREF\tALT\n"
-           << "1\t100\ttarget-v1\tA\tG\n"
-           << "1\t200\ttarget-v2\tC\tT\n";
+           << "1\t100\ttarget-v1\tA\tG\n";
+  }
+  {
+    std::ofstream output(pvar2_path);
+    output << "#CHROM\tPOS\tID\tREF\tALT\n"
+           << "2\t200\ttarget-v2\tC\tT\n";
+  }
+  {
+    std::ofstream output(pvar_list_path);
+    output << "PVAR\n"
+           << pvar1_path.filename().string() << '\n'
+           << pvar2_path.filename().string() << '\n';
   }
   {
     std::ofstream output(frequency_path);
@@ -452,7 +464,7 @@ void TestScoreFragment() {
   }
   pgensparsescore::SupportIndexBuildOptions support_options;
   support_options.variant_index_path = index_path.string();
-  support_options.pvar_path = pvar_path.string();
+  support_options.pvar_list_path = pvar_list_path.string();
   support_options.frequency_path = frequency_path.string();
   support_options.output_path = support_path.string();
   const auto support_summary =
@@ -460,7 +472,8 @@ void TestScoreFragment() {
   if (support_summary.variant_ct != 3 ||
       support_summary.usable_variant_ct != 1 ||
       support_summary.missing_frequency_ct != 1 ||
-      support_summary.missing_variant_ct != 1) {
+      support_summary.missing_variant_ct != 1 ||
+      support_summary.pvar_input_ct != 2 || support_summary.pvar_row_ct != 2) {
     throw std::runtime_error("support-index summary is wrong");
   }
   {
@@ -555,6 +568,24 @@ void TestScoreFragment() {
       reader.scores()[1].info.catalog_weight_ct != 1 ||
       reader.scores()[1].info.missing_variant_ct != 1) {
     throw std::runtime_error("projected fragment QC metadata is wrong");
+  }
+  {
+    pgensparsescore::SupportIndex support(support_path.string());
+    const auto availability =
+        pgensparsescore::MeasureScoreFragmentSupport(reader, support);
+    if (availability.variant_ct != 3 || availability.score_ct != 2 ||
+        availability.reference_weight_ct != 2 ||
+        availability.available_weight_ct != 2 ||
+        availability.scores[0].reference_weight_ct != 2 ||
+        availability.scores[0].available_weight_ct != 2 ||
+        availability.scores[1].reference_weight_ct != 0 ||
+        availability.scores[1].available_weight_ct != 0) {
+      throw std::runtime_error("score-fragment support counts are wrong");
+    }
+    ExpectNear(availability.scores[0].available_weight_l1, 6.0,
+               "available fragment absolute weight");
+    ExpectNear(availability.scores[0].available_weight_l2_squared, 20.0,
+               "available fragment squared weight");
   }
 
   const auto screened_fragment_path = directory / "screened.fragment.bin";

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -101,6 +102,12 @@ struct SupportIndexOptions {
   std::string progress_interval_seconds;
 };
 
+struct FragmentSupportOptions {
+  std::string fragment_path;
+  std::string support_index_path;
+  std::string output_path;
+};
+
 class RemoveFileOnExit {
  public:
   explicit RemoveFileOnExit(std::string path) : path_(std::move(path)) {}
@@ -137,7 +144,8 @@ void PrintUsage(std::ostream& stream) {
       "                          [--progress-interval-seconds N] \\\n"
       "                          --out VARIANTS.index.bin\n"
       "  pgensparsescore build-support-index --variant-index FILE \\\n"
-      "                          --pvar FILE --read-freq FILE \\\n"
+      "                          (--pvar FILE | --pvar-list FILE) \\\n"
+      "                          --read-freq FILE \\\n"
       "                          [--progress-jsonl FILE] \\\n"
       "                          [--progress-interval-seconds N] \\\n"
       "                          --out VARIANTS.support.bin\n"
@@ -150,6 +158,9 @@ void PrintUsage(std::ostream& stream) {
       "                          --out SCORES.fragment.bin\n"
       "  pgensparsescore merge-variant-bits --list FILE \\\n"
       "                          --out VARIANTS.bits\n"
+      "  pgensparsescore report-fragment-support --fragment FILE \\\n"
+      "                          --support-index FILE \\\n"
+      "                          --out REPORT.tsv\n"
       "  pgensparsescore compile --manifest FILE [--variant-map FILE] \\\n"
       "                          [--progress-jsonl FILE] \\\n"
       "                          [--progress-interval-seconds N] \\\n"
@@ -456,6 +467,7 @@ SupportIndexOptions ParseSupportIndexOptions(int argc, char** argv) {
   std::unordered_map<std::string, std::string*> destinations{
       {"--variant-index", &options.build.variant_index_path},
       {"--pvar", &options.build.pvar_path},
+      {"--pvar-list", &options.build.pvar_list_path},
       {"--read-freq", &options.build.frequency_path},
       {"--progress-jsonl", &options.progress_jsonl},
       {"--progress-interval-seconds", &options.progress_interval_seconds},
@@ -474,11 +486,12 @@ SupportIndexOptions ParseSupportIndexOptions(int argc, char** argv) {
     *iter->second = argv[idx];
   }
   if (options.build.variant_index_path.empty() ||
-      options.build.pvar_path.empty() || options.build.frequency_path.empty() ||
+      (options.build.pvar_path.empty() == options.build.pvar_list_path.empty()) ||
+      options.build.frequency_path.empty() ||
       options.build.output_path.empty()) {
     throw std::runtime_error(
-        "build-support-index requires --variant-index, --pvar, --read-freq, "
-        "and --out");
+        "build-support-index requires --variant-index, exactly one of --pvar "
+        "and --pvar-list, --read-freq, and --out");
   }
   if (!options.progress_interval_seconds.empty() &&
       options.progress_jsonl.empty()) {
@@ -487,6 +500,39 @@ SupportIndexOptions ParseSupportIndexOptions(int argc, char** argv) {
   }
   if (!options.progress_interval_seconds.empty()) {
     ParseProgressInterval(options.progress_interval_seconds);
+  }
+  return options;
+}
+
+FragmentSupportOptions ParseFragmentSupportOptions(int argc, char** argv) {
+  if (argc == 3 && std::string(argv[2]) == "--help") {
+    PrintUsage(std::cout);
+    std::exit(0);
+  }
+  FragmentSupportOptions options;
+  std::unordered_map<std::string, std::string*> destinations{
+      {"--fragment", &options.fragment_path},
+      {"--support-index", &options.support_index_path},
+      {"--out", &options.output_path},
+  };
+  for (int idx = 2; idx < argc; ++idx) {
+    const std::string key(argv[idx]);
+    const auto iter = destinations.find(key);
+    if (iter == destinations.end()) {
+      throw std::runtime_error("unknown report-fragment-support argument: " +
+                               key);
+    }
+    if (++idx >= argc) throw std::runtime_error("missing value after " + key);
+    if (!iter->second->empty()) {
+      throw std::runtime_error("argument supplied twice: " + key);
+    }
+    *iter->second = argv[idx];
+  }
+  if (options.fragment_path.empty() || options.support_index_path.empty() ||
+      options.output_path.empty()) {
+    throw std::runtime_error(
+        "report-fragment-support requires --fragment, --support-index, and "
+        "--out");
   }
   return options;
 }
@@ -1425,6 +1471,7 @@ int SupportIndexMain(int argc, char** argv) {
            << summary.missing_frequency_ct << ",\n"
            << "  \"usable_variants\": " << summary.usable_variant_ct
            << ",\n"
+           << "  \"pvar_inputs\": " << summary.pvar_input_ct << ",\n"
            << "  \"pvar_rows\": " << summary.pvar_row_ct << ",\n"
            << "  \"frequency_rows\": " << summary.frequency_row_ct
            << ",\n"
@@ -1436,6 +1483,89 @@ int SupportIndexMain(int argc, char** argv) {
             << " usable variants, " << summary.missing_variant_ct
             << " missing variants, and " << summary.missing_frequency_ct
             << " missing frequencies\n";
+  return 0;
+}
+
+int FragmentSupportMain(int argc, char** argv) {
+  const FragmentSupportOptions options =
+      ParseFragmentSupportOptions(argc, argv);
+  const std::string metadata_path = options.output_path + ".json";
+  if (std::filesystem::exists(options.output_path) ||
+      std::filesystem::exists(metadata_path)) {
+    throw std::runtime_error("fragment-support output already exists: " +
+                             options.output_path);
+  }
+  const pgensparsescore::ScoreFragmentReader fragment(options.fragment_path);
+  const pgensparsescore::SupportIndex support(options.support_index_path);
+  const auto summary =
+      pgensparsescore::MeasureScoreFragmentSupport(fragment, support);
+
+  const std::string temporary_output = options.output_path + ".tmp";
+  RemoveFileOnExit output_cleanup(temporary_output);
+  std::ofstream output(temporary_output);
+  if (!output) throw std::runtime_error("cannot write " + temporary_output);
+  output << "SCORE_ID\tCOLUMN_NAME\tREFERENCE_WEIGHT_COUNT"
+            "\tTARGET_AVAILABLE_WEIGHT_COUNT\tTARGET_AVAILABLE_FRACTION"
+            "\tREFERENCE_ABS_WEIGHT\tTARGET_AVAILABLE_ABS_WEIGHT"
+            "\tTARGET_AVAILABLE_ABS_WEIGHT_FRACTION"
+            "\tREFERENCE_SQUARED_WEIGHT\tTARGET_AVAILABLE_SQUARED_WEIGHT"
+            "\tTARGET_AVAILABLE_SQUARED_WEIGHT_FRACTION\n"
+         << std::setprecision(17);
+  for (const auto& row : summary.scores) {
+    const double row_fraction =
+        row.reference_weight_ct
+            ? static_cast<double>(row.available_weight_ct) /
+                  static_cast<double>(row.reference_weight_ct)
+            : 0.0;
+    const double l1_fraction =
+        row.reference_weight_l1
+            ? row.available_weight_l1 / row.reference_weight_l1
+            : 0.0;
+    const double l2_fraction =
+        row.reference_weight_l2_squared
+            ? row.available_weight_l2_squared /
+                  row.reference_weight_l2_squared
+            : 0.0;
+    output << row.score_id << '\t' << row.column_name << '\t'
+           << row.reference_weight_ct << '\t' << row.available_weight_ct
+           << '\t' << row_fraction << '\t' << row.reference_weight_l1 << '\t'
+           << row.available_weight_l1 << '\t' << l1_fraction << '\t'
+           << row.reference_weight_l2_squared << '\t'
+           << row.available_weight_l2_squared << '\t' << l2_fraction << '\n';
+  }
+  output.close();
+  if (!output) throw std::runtime_error("cannot finish " + temporary_output);
+  std::filesystem::rename(temporary_output, options.output_path);
+  output_cleanup.Release();
+
+  const std::string temporary_metadata = metadata_path + ".tmp";
+  RemoveFileOnExit metadata_cleanup(temporary_metadata);
+  std::ofstream metadata(temporary_metadata);
+  if (!metadata) {
+    throw std::runtime_error("cannot write " + temporary_metadata);
+  }
+  metadata << "{\n"
+           << "  \"format\": \"pgensparsescore-fragment-support-v1\",\n"
+           << "  \"path\": \""
+           << pgensparsescore::JsonEscape(
+                  std::filesystem::path(options.output_path).filename().string())
+           << "\",\n"
+           << "  \"variants\": " << summary.variant_ct << ",\n"
+           << "  \"scores\": " << summary.score_ct << ",\n"
+           << "  \"reference_weights\": " << summary.reference_weight_ct
+           << ",\n"
+           << "  \"target_available_weights\": "
+           << summary.available_weight_ct << "\n"
+           << "}\n";
+  metadata.close();
+  if (!metadata) {
+    throw std::runtime_error("cannot finish " + temporary_metadata);
+  }
+  std::filesystem::rename(temporary_metadata, metadata_path);
+  metadata_cleanup.Release();
+  std::cerr << "reported " << summary.available_weight_ct << " of "
+            << summary.reference_weight_ct << " reference-projected weights "
+            << "across " << summary.score_ct << " scores\n";
   return 0;
 }
 
@@ -1537,6 +1667,9 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && std::string(argv[1]) == "build-support-index") {
       return SupportIndexMain(argc, argv);
+    }
+    if (argc > 1 && std::string(argv[1]) == "report-fragment-support") {
+      return FragmentSupportMain(argc, argv);
     }
     if (argc > 1 && std::string(argv[1]) == "compile") {
       return CompileMain(argc, argv);
