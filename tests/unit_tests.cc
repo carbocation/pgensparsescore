@@ -677,12 +677,14 @@ void TestMultiFragmentSingleDecodeScoring() {
     std::vector<double> values;
     pgensparsescore::ScoreRunStats stats;
     {
-      pgensparsescore::MappedMatrix matrix(matrix_path.string(), 2, sample_ct);
+      pgensparsescore::MappedMatrix matrix(
+          matrix_path.string(), loaded.catalog.scores.size(), sample_ct);
       stats = pgensparsescore::ScoreFragments(
           index, loaded.fragments, loaded.score_maps, locations, &frequencies,
           pgensparsescore::MissingFrequencyPolicy::kError, readers,
           &loaded.catalog, &matrix, thread_ct, dense_kernel, thread_ct);
-      values.assign(matrix.Row(0), matrix.Row(0) + 2 * sample_ct);
+      values.assign(matrix.Row(0),
+                    matrix.Row(0) + loaded.catalog.scores.size() * sample_ct);
     }
     std::filesystem::remove(matrix_path);
     return std::make_pair(values, stats);
@@ -763,6 +765,24 @@ void TestMultiFragmentSingleDecodeScoring() {
     ExpectNear(reordered.first[sample_ct + sample_idx],
                combined.first[sample_idx],
                "stable-ID schema reordered score A");
+  }
+  const auto subset_schema_path = directory / "subset-schema.tsv";
+  {
+    std::ofstream output(subset_schema_path);
+    output << "SCORE_ID\tCOLUMN_NAME\n"
+           << "score_b\trenamed_b\n";
+  }
+  const auto subset = score(
+      {fragment_a_path.string(), fragment_b_path.string()},
+      directory / "subset.matrix.bin", subset_schema_path.string());
+  if (subset.first.size() != sample_ct || subset.second.edge_ct != 2 ||
+      subset.second.score_major_row_ct != 2) {
+    throw std::runtime_error("subset score schema accounting is wrong");
+  }
+  for (uint32_t sample_idx = 0; sample_idx < sample_ct; ++sample_idx) {
+    ExpectNear(subset.first[sample_idx],
+               combined.first[sample_ct + sample_idx],
+               "subset score schema score B");
   }
   std::filesystem::remove_all(directory);
 }

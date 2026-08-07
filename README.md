@@ -126,7 +126,9 @@ fragments/fragment_00000.bin
 fragments/fragment_00001.bin
 ```
 
-The optional score schema fixes the requested row order and column names:
+The optional score schema selects scores and fixes their requested row order
+and column names. Scores present in the fragments but absent from the schema
+are not computed or written:
 
 ```text
 SCORE_ID	COLUMN_NAME

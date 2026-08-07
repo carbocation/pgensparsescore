@@ -27,6 +27,8 @@
 namespace pgensparsescore {
 namespace {
 
+constexpr uint32_t kExcludedOutputScore = UINT32_MAX;
+
 using Header = std::unordered_map<std::string, size_t>;
 
 Header MakeHeader(const std::vector<std::string>& fields,
@@ -632,6 +634,7 @@ LoadedScoreFragments LoadScoreFragments(
   LoadedScoreFragments result;
   result.fragments.reserve(paths.size());
   uint64_t score_ct = 0;
+  uint64_t opened_weight_ct = 0;
   uint32_t tile_size = 0;
   uint32_t tile_ct = 0;
   for (const auto& path : paths) {
@@ -652,14 +655,14 @@ LoadedScoreFragments LoadScoreFragments(
           "score fragments use different scoring-tile geometries");
     }
     score_ct += fragment.scores().size();
-    result.weight_ct += fragment.weight_ct();
+    opened_weight_ct += fragment.weight_ct();
     result.file_byte_ct += fragment.file_bytes();
     if (progress) {
       progress->Event("score", "fragment_loaded",
                       {{"fragments_loaded", result.fragments.size()},
                        {"fragments_total", paths.size()},
                        {"scores_loaded", score_ct},
-                       {"weights_available", result.weight_ct},
+                       {"weights_available", opened_weight_ct},
                        {"fragment_bytes", result.file_byte_ct}},
                       {{"fragment", path}});
     }
@@ -711,9 +714,12 @@ LoadedScoreFragments LoadScoreFragments(
       schema_ids.push_back(fields[id_idx]);
       schema_columns.push_back(fields[column_idx]);
     }
-    if (schema_ids.size() != score_ct) {
+    if (schema_ids.empty()) {
+      throw std::runtime_error(score_schema_path + " contains no scores");
+    }
+    if (schema_ids.size() > score_ct) {
       throw std::runtime_error(
-          "score schema and fragments contain different score counts");
+          "score schema contains more scores than the fragments");
     }
   }
 
@@ -724,10 +730,12 @@ LoadedScoreFragments LoadScoreFragments(
       output_by_id.emplace(schema_ids[idx], idx);
     }
   }
-  result.catalog.scores.resize(static_cast<size_t>(score_ct));
-  result.catalog.intercepts.assign(static_cast<size_t>(score_ct), 0.0);
+  const uint64_t output_score_ct =
+      schema_ids.empty() ? score_ct : schema_ids.size();
+  result.catalog.scores.resize(static_cast<size_t>(output_score_ct));
+  result.catalog.intercepts.assign(static_cast<size_t>(output_score_ct), 0.0);
   result.score_maps.resize(result.fragments.size());
-  std::vector<bool> output_seen(score_ct, false);
+  std::vector<bool> output_seen(output_score_ct, false);
   std::unordered_set<std::string> fragment_ids;
   std::unordered_set<std::string> output_columns;
   uint32_t next_output_idx = 0;
@@ -742,16 +750,18 @@ LoadedScoreFragments LoadScoreFragments(
             "score fragments contain duplicate stable score ID " +
             fragment_score.score_id);
       }
-      uint32_t output_idx = next_output_idx++;
+      uint32_t output_idx = next_output_idx;
       std::string output_column = fragment_score.info.id;
       if (!schema_ids.empty()) {
         const auto schema = output_by_id.find(fragment_score.score_id);
         if (schema == output_by_id.end()) {
-          throw std::runtime_error("score schema has no row for fragment score " +
-                                   fragment_score.score_id);
+          score_map.push_back(kExcludedOutputScore);
+          continue;
         }
         output_idx = schema->second;
         output_column = schema_columns[output_idx];
+      } else {
+        ++next_output_idx;
       }
       if (output_seen[output_idx] ||
           !output_columns.insert(output_column).second) {
@@ -764,6 +774,8 @@ LoadedScoreFragments LoadScoreFragments(
       auto& score = result.catalog.scores[output_idx];
       score.id = output_column;
       score.ref_effect_intercept = 0.0;
+      result.weight_ct += score.catalog_weight_ct - score.missing_variant_ct -
+                          score.missing_frequency_ct;
     }
   }
   if (std::find(output_seen.begin(), output_seen.end(), false) !=
@@ -981,7 +993,9 @@ ScoreRunStats ScoreFragments(
           throw std::runtime_error(
               "score-major fragment row has invalid local score index");
         }
-        tasks.push_back({&row, score_map[row.local_score_idx()]});
+        const uint32_t output_score_idx = score_map[row.local_score_idx()];
+        if (output_score_idx == kExcludedOutputScore) continue;
+        tasks.push_back({&row, output_score_idx});
         tile_edge_ct += row.edge_ct();
       }
     }
