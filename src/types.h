@@ -45,6 +45,12 @@ struct ScoreInfo {
   uint64_t missing_frequency_ct = 0;
   uint64_t ref_effect_ct = 0;
   uint64_t alt_effect_ct = 0;
+  double nonzero_weight_l1 = 0.0;
+  double nonzero_weight_l2 = 0.0;
+  double catalog_weight_l1 = 0.0;
+  double catalog_weight_l2 = 0.0;
+  double supported_weight_l1 = 0.0;
+  double supported_weight_l2 = 0.0;
   double ref_effect_intercept = 0.0;
 };
 

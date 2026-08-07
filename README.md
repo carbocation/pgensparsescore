@@ -114,7 +114,10 @@ adds scores or changes the output column order. The compiler streams weight
 rows into variant blocks and sorts one block at a time; it does not retain the
 whole fragment in memory. Within each output fragment, weights are stored by
 2,000-variant scoring tile and then by score. Fragments built by earlier
-versions used a different layout and must be rebuilt. When `--support-index`
+versions used a different layout and must be rebuilt. Each compiled fragment
+also writes a per-score QC table with row counts and L1/squared-weight mass,
+plus a compact variant bitset for constructing the exact union used by a set
+of fragments. When `--support-index`
 is supplied, the fragment retains the full score-level QC counts but stores
 only weights that can contribute in the reference dataset.
 

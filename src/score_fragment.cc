@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -26,9 +27,12 @@
 namespace pgensparsescore {
 namespace {
 
-constexpr char kMagic[8] = {'P', 'G', 'S', 'S', 'S', 'M', 'J', '2'};
-constexpr uint32_t kVersion = 2;
+constexpr char kMagic[8] = {'P', 'G', 'S', 'S', 'S', 'M', 'J', '3'};
+constexpr uint32_t kVersion = 3;
 constexpr uint32_t kHeaderBytes = 96;
+constexpr char kVariantBitsMagic[8] = {'P', 'G', 'S', 'S', 'V', 'B', 'I', 'T'};
+constexpr uint32_t kVariantBitsVersion = 1;
+constexpr uint32_t kVariantBitsHeaderBytes = 64;
 constexpr uint32_t kPreferredTileSize = 2000;
 constexpr uint32_t kRefEffectMask = 0x80000000U;
 constexpr uint32_t kIndexMask = 0x7fffffffU;
@@ -111,6 +115,81 @@ uint64_t Position(std::ostream* output, const std::string& path) {
   return static_cast<uint64_t>(position);
 }
 
+class FileCleanup {
+ public:
+  explicit FileCleanup(std::string path) : path_(std::move(path)) {}
+  ~FileCleanup() {
+    if (!active_) return;
+    std::error_code ignored;
+    std::filesystem::remove(path_, ignored);
+  }
+  void Release() { active_ = false; }
+
+ private:
+  std::string path_;
+  bool active_ = true;
+};
+
+void WriteScoreQc(const std::string& path,
+                  const std::vector<FragmentScore>& scores) {
+  const std::string temporary = path + ".tmp";
+  FileCleanup cleanup(temporary);
+  std::ofstream output(temporary, std::ios::trunc);
+  if (!output) throw std::runtime_error("cannot create " + temporary);
+  output << "SCORE_ID\tCOLUMN_NAME\tPATH\tINPUT_WEIGHTS\tZERO_WEIGHTS"
+            "\tEXCLUDED_WEIGHTS\tDUPLICATE_WEIGHTS\tCATALOG_WEIGHTS"
+            "\tREFERENCE_SUPPORTED_WEIGHTS\tREFERENCE_MISSING_VARIANT_WEIGHTS"
+            "\tREFERENCE_MISSING_FREQUENCY_WEIGHTS\tNONZERO_WEIGHT_L1"
+            "\tNONZERO_WEIGHT_L2\tCATALOG_WEIGHT_L1\tCATALOG_WEIGHT_L2"
+            "\tREFERENCE_SUPPORTED_WEIGHT_L1\tREFERENCE_SUPPORTED_WEIGHT_L2\n";
+  output << std::setprecision(17);
+  for (const auto& score : scores) {
+    const auto& info = score.info;
+    const uint64_t supported = info.catalog_weight_ct -
+                               info.missing_variant_ct -
+                               info.missing_frequency_ct;
+    output << score.score_id << '\t' << info.id << '\t' << info.path << '\t'
+           << info.input_weight_ct << '\t' << info.zero_weight_ct << '\t'
+           << info.excluded_weight_ct << '\t' << info.duplicate_weight_ct
+           << '\t' << info.catalog_weight_ct << '\t' << supported << '\t'
+           << info.missing_variant_ct << '\t' << info.missing_frequency_ct
+           << '\t' << info.nonzero_weight_l1 << '\t' << info.nonzero_weight_l2
+           << '\t' << info.catalog_weight_l1 << '\t'
+           << info.catalog_weight_l2 << '\t' << info.supported_weight_l1
+           << '\t' << info.supported_weight_l2 << '\n';
+  }
+  output.close();
+  if (!output) throw std::runtime_error("cannot finish " + temporary);
+  std::filesystem::rename(temporary, path);
+  cleanup.Release();
+}
+
+uint64_t WriteVariantBits(const std::string& path, const VariantIndex& index,
+                          const std::vector<uint64_t>& words,
+                          uint64_t referenced_variant_ct) {
+  const std::string temporary = path + ".tmp";
+  FileCleanup cleanup(temporary);
+  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+  if (!output) throw std::runtime_error("cannot create " + temporary);
+  WriteBytes(&output, kVariantBitsMagic, sizeof(kVariantBitsMagic), temporary);
+  WriteU32(&output, kVariantBitsVersion, temporary);
+  WriteU32(&output, kVariantBitsHeaderBytes, temporary);
+  WriteU64(&output, index.variant_ct(), temporary);
+  WriteU64(&output, index.signature_lo(), temporary);
+  WriteU64(&output, index.signature_hi(), temporary);
+  WriteU64(&output, referenced_variant_ct, temporary);
+  const uint64_t file_bytes =
+      kVariantBitsHeaderBytes + static_cast<uint64_t>(words.size()) * 8;
+  WriteU64(&output, file_bytes, temporary);
+  WriteU64(&output, 0, temporary);
+  for (const uint64_t word : words) WriteU64(&output, word, temporary);
+  output.close();
+  if (!output) throw std::runtime_error("cannot finish " + temporary);
+  std::filesystem::rename(temporary, path);
+  cleanup.Release();
+  return file_bytes;
+}
+
 Header MakeHeader(const std::vector<std::string>& fields,
                   const std::string& path) {
   Header result;
@@ -166,21 +245,6 @@ class DirectoryCleanup {
 
  private:
   std::filesystem::path path_;
-};
-
-class FileCleanup {
- public:
-  explicit FileCleanup(std::string path) : path_(std::move(path)) {}
-  ~FileCleanup() {
-    if (!active_) return;
-    std::error_code ignored;
-    std::filesystem::remove(path_, ignored);
-  }
-  void Release() { active_ = false; }
-
- private:
-  std::string path_;
-  bool active_ = true;
 };
 
 std::filesystem::path CreateTemporaryDirectory(
@@ -331,6 +395,12 @@ ScoreFragmentSummary CompileScoreFragment(
     throw std::runtime_error("score-fragment output already exists: " +
                              options.output_path);
   }
+  for (const std::string suffix : {".score_qc.tsv", ".variants.bits"}) {
+    if (std::filesystem::exists(options.output_path + suffix)) {
+      throw std::runtime_error("score-fragment sidecar already exists: " +
+                               options.output_path + suffix);
+    }
+  }
   VariantIndex index(options.variant_index_path);
   std::unique_ptr<SupportIndex> support;
   if (!options.support_index_path.empty()) {
@@ -370,6 +440,8 @@ ScoreFragmentSummary CompileScoreFragment(
   DirectoryCleanup cleanup(temp_directory);
   std::vector<std::unique_ptr<std::ofstream>> buckets(index.block_ct());
   std::vector<uint64_t> bucket_weight_ct(index.block_ct(), 0);
+  std::vector<uint64_t> referenced_variant_words(
+      (index.variant_ct() + 63) / 64, 0);
   std::vector<FragmentScore> scores;
   scores.reserve(manifest.size());
   ScoreFragmentSummary summary;
@@ -419,6 +491,10 @@ ScoreFragmentSummary CompileScoreFragment(
         ++summary.zero_weight_ct;
         continue;
       }
+      const double absolute_weight = std::abs(weight);
+      const double squared_weight = weight * weight;
+      info.nonzero_weight_l1 += absolute_weight;
+      info.nonzero_weight_l2 += squared_weight;
       const auto ordinal = index.Lookup(fields[snp_idx]);
       if (!ordinal) {
         ++info.excluded_weight_ct;
@@ -444,6 +520,8 @@ ScoreFragmentSummary CompileScoreFragment(
       }
       ++info.catalog_weight_ct;
       ++summary.catalog_weight_ct;
+      info.catalog_weight_l1 += absolute_weight;
+      info.catalog_weight_l2 += squared_weight;
       if (support) {
         const VariantSupport state = support->state(*ordinal);
         if (state == VariantSupport::kMissingVariant) {
@@ -463,6 +541,10 @@ ScoreFragmentSummary CompileScoreFragment(
           continue;
         }
       }
+      info.supported_weight_l1 += absolute_weight;
+      info.supported_weight_l2 += squared_weight;
+      referenced_variant_words[*ordinal / 64] |=
+          uint64_t{1} << (*ordinal % 64);
       const uint32_t block_idx = *ordinal / index.block_size();
       if (!buckets[block_idx]) {
         const auto path = temp_directory /
@@ -551,6 +633,12 @@ ScoreFragmentSummary CompileScoreFragment(
     WriteU64(&output, score.info.missing_frequency_ct, temporary_output);
     WriteU64(&output, score.info.alt_effect_ct, temporary_output);
     WriteU64(&output, score.info.ref_effect_ct, temporary_output);
+    WriteDouble(&output, score.info.nonzero_weight_l1, temporary_output);
+    WriteDouble(&output, score.info.nonzero_weight_l2, temporary_output);
+    WriteDouble(&output, score.info.catalog_weight_l1, temporary_output);
+    WriteDouble(&output, score.info.catalog_weight_l2, temporary_output);
+    WriteDouble(&output, score.info.supported_weight_l1, temporary_output);
+    WriteDouble(&output, score.info.supported_weight_l2, temporary_output);
   }
   const uint64_t tile_directory_offset = Position(&output, temporary_output);
   std::vector<uint64_t> tile_offsets(static_cast<uint64_t>(tile_ct) + 1, 0);
@@ -702,6 +790,13 @@ ScoreFragmentSummary CompileScoreFragment(
   if (!output) throw std::runtime_error("cannot finish " + temporary_output);
   std::filesystem::rename(temporary_output, options.output_path);
   output_cleanup.Release();
+  for (const uint64_t word : referenced_variant_words) {
+    summary.referenced_variant_ct += Popcount(word);
+  }
+  WriteScoreQc(options.output_path + ".score_qc.tsv", scores);
+  summary.variant_bitset_bytes = WriteVariantBits(
+      options.output_path + ".variants.bits", index,
+      referenced_variant_words, summary.referenced_variant_ct);
   if (progress) {
     progress->Event("fragment", "complete",
                     {{"scores", summary.score_ct},
@@ -809,7 +904,7 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
     }
     cursor = ReadString(cursor, score_end, path, &score.info.id);
     cursor = ReadString(cursor, score_end, path, &score.info.path);
-    if (score_end - cursor < 80) {
+    if (score_end - cursor < 128) {
       throw std::runtime_error(path + " is truncated");
     }
     score.info.input_weight_ct = GetU64(cursor);
@@ -822,7 +917,17 @@ ScoreFragmentReader::ScoreFragmentReader(const std::string& path)
     score.info.missing_frequency_ct = GetU64(cursor + 56);
     score.info.alt_effect_ct = GetU64(cursor + 64);
     score.info.ref_effect_ct = GetU64(cursor + 72);
-    cursor += 80;
+    const uint64_t mass_bits[] = {
+        GetU64(cursor + 80), GetU64(cursor + 88), GetU64(cursor + 96),
+        GetU64(cursor + 104), GetU64(cursor + 112), GetU64(cursor + 120)};
+    double* masses[] = {
+        &score.info.nonzero_weight_l1, &score.info.nonzero_weight_l2,
+        &score.info.catalog_weight_l1, &score.info.catalog_weight_l2,
+        &score.info.supported_weight_l1, &score.info.supported_weight_l2};
+    for (uint32_t mass_idx = 0; mass_idx < 6; ++mass_idx) {
+      std::memcpy(masses[mass_idx], &mass_bits[mass_idx], sizeof(double));
+    }
+    cursor += 128;
     if (score.info.catalog_weight_ct < score.info.missing_variant_ct ||
         score.info.catalog_weight_ct - score.info.missing_variant_ct <
             score.info.missing_frequency_ct ||

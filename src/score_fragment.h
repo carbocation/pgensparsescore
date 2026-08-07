@@ -38,6 +38,8 @@ struct ScoreFragmentSummary {
   uint64_t duplicate_weight_ct = 0;
   uint64_t missing_variant_weight_ct = 0;
   uint64_t missing_frequency_weight_ct = 0;
+  uint64_t referenced_variant_ct = 0;
+  uint64_t variant_bitset_bytes = 0;
   uint64_t output_bytes = 0;
 };
 

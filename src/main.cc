@@ -886,7 +886,10 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
     output << "INDEX\tSCORE\tINPUT_WEIGHTS\tZERO_WEIGHTS"
               "\tEXCLUDED_WEIGHTS\tDUPLICATE_WEIGHTS\tCATALOG_WEIGHTS\tMATCHED_WEIGHTS"
               "\tMISSING_VARIANTS\tMISSING_FREQUENCIES\tSCORED_WEIGHTS"
-              "\tALT_EFFECTS\tREF_EFFECTS\tREF_INTERCEPT\n";
+              "\tALT_EFFECTS\tREF_EFFECTS\tNONZERO_WEIGHT_L1\tNONZERO_WEIGHT_L2"
+              "\tCATALOG_WEIGHT_L1\tCATALOG_WEIGHT_L2"
+              "\tREFERENCE_SUPPORTED_WEIGHT_L1"
+              "\tREFERENCE_SUPPORTED_WEIGHT_L2\tREF_INTERCEPT\n";
     for (uint32_t idx = 0; idx < catalog.scores.size(); ++idx) {
       const auto& score = catalog.scores[idx];
       output << idx << '\t' << score.id << '\t' << score.input_weight_ct << '\t'
@@ -897,7 +900,12 @@ void WriteMetadata(const std::string& prefix, uint32_t sample_ct, bool has_fid,
              << score.missing_frequency_ct << '\t'
              << (score.matched_weight_ct - score.missing_frequency_ct)
              << '\t' << score.alt_effect_ct << '\t' << score.ref_effect_ct
-             << '\t' << score.ref_effect_intercept << '\n';
+             << '\t' << score.nonzero_weight_l1 << '\t'
+             << score.nonzero_weight_l2 << '\t' << score.catalog_weight_l1
+             << '\t' << score.catalog_weight_l2 << '\t'
+             << score.supported_weight_l1 << '\t'
+             << score.supported_weight_l2 << '\t'
+             << score.ref_effect_intercept << '\n';
     }
   }
   {
@@ -1383,7 +1391,7 @@ int FragmentCompileMain(int argc, char** argv) {
   std::ofstream metadata(options.build.output_path + ".json");
   if (!metadata) throw std::runtime_error("cannot write fragment metadata");
   metadata << "{\n"
-           << "  \"format\": \"pgensparsescore-score-major-fragment-v2\",\n"
+           << "  \"format\": \"pgensparsescore-score-major-fragment-v3\",\n"
            << "  \"path\": \""
            << pgensparsescore::JsonEscape(
                   std::filesystem::path(options.build.output_path)
@@ -1408,6 +1416,22 @@ int FragmentCompileMain(int argc, char** argv) {
            << summary.missing_variant_weight_ct << ",\n"
            << "  \"missing_frequency_weights\": "
            << summary.missing_frequency_weight_ct << ",\n"
+           << "  \"referenced_variants\": "
+           << summary.referenced_variant_ct << ",\n"
+           << "  \"score_qc_path\": \""
+           << pgensparsescore::JsonEscape(
+                  std::filesystem::path(options.build.output_path + ".score_qc.tsv")
+                      .filename()
+                      .string())
+           << "\",\n"
+           << "  \"variant_bitset_path\": \""
+           << pgensparsescore::JsonEscape(
+                  std::filesystem::path(options.build.output_path + ".variants.bits")
+                      .filename()
+                      .string())
+           << "\",\n"
+           << "  \"variant_bitset_bytes\": "
+           << summary.variant_bitset_bytes << ",\n"
            << "  \"bytes\": " << summary.output_bytes << "\n"
            << "}\n";
   metadata.close();

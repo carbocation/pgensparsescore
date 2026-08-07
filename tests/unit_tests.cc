@@ -509,7 +509,10 @@ void TestScoreFragment() {
       summary.weight_ct != 2 || summary.missing_variant_weight_ct != 1 ||
       summary.missing_frequency_weight_ct != 1 ||
       summary.input_weight_ct != 6 || summary.zero_weight_ct != 1 ||
-      summary.excluded_weight_ct != 1 || summary.duplicate_weight_ct != 1) {
+      summary.excluded_weight_ct != 1 || summary.duplicate_weight_ct != 1 ||
+      summary.referenced_variant_ct != 1 || summary.variant_bitset_bytes != 72 ||
+      !std::filesystem::exists(fragment_path.string() + ".score_qc.tsv") ||
+      !std::filesystem::exists(fragment_path.string() + ".variants.bits")) {
     throw std::runtime_error("score-fragment summary is wrong");
   }
   pgensparsescore::ScoreFragmentReader reader(fragment_path.string());
@@ -541,6 +544,12 @@ void TestScoreFragment() {
       reader.scores()[0].info.matched_weight_ct != 1 ||
       reader.scores()[0].info.missing_frequency_ct != 1 ||
       reader.scores()[0].info.ref_effect_ct != 1 ||
+      reader.scores()[0].info.nonzero_weight_l1 != 14.0 ||
+      reader.scores()[0].info.nonzero_weight_l2 != 54.0 ||
+      reader.scores()[0].info.catalog_weight_l1 != 9.0 ||
+      reader.scores()[0].info.catalog_weight_l2 != 29.0 ||
+      reader.scores()[0].info.supported_weight_l1 != 6.0 ||
+      reader.scores()[0].info.supported_weight_l2 != 20.0 ||
       reader.scores()[1].info.catalog_weight_ct != 1 ||
       reader.scores()[1].info.missing_variant_ct != 1) {
     throw std::runtime_error("projected fragment QC metadata is wrong");
